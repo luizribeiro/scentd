@@ -7,7 +7,7 @@ use std::error::Error;
 use tokio::time::Duration;
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
-    let mut mqttoptions = MqttOptions::new("fragrance_bridge", "localhost", 1883);
+    let mut mqttoptions = MqttOptions::new("scentd", "localhost", 1883);
     mqttoptions.set_keep_alive(Duration::from_secs(5));
 
     AsyncClient::new(mqttoptions, 10)
@@ -56,7 +56,7 @@ pub async fn publish_device_state(
     // For Home Assistant discovery, publish config topics
     let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
     let config_payload = json!({
-        "name": device.product_name,
+        "name": "Diffuser",
         "state_topic": state_topic,
         "command_topic": command_topic,
         "unique_id": device.dsn,
@@ -80,12 +80,13 @@ pub async fn publish_device_state(
         "Published switch config for {} to topic {}",
         device.product_name, config_topic
     );
+    debug!("Config payload: {}", config_payload);
 
     // Publish intensity control configuration
     let intensity_config_topic = format!("homeassistant/number/{}/config", device.dsn);
     let intensity_command_topic = format!("{}/intensity/set", base_topic);
     let intensity_config_payload = json!({
-        "name": format!("{} Intensity", device.product_name),
+        "name": "Fragrance Intensity",
         "state_topic": intensity_topic,
         "command_topic": intensity_command_topic,
         "unique_id": format!("{}_intensity", device.dsn),
