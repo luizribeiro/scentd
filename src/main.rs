@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mqtt_client, eventloop) = mqtt::get_mqtt_client();
 
     let devices_clone = devices.clone();
+    let mqtt_client_clone = mqtt_client.clone();
     task::spawn(async move {
         // Subscribe to command topics and publish initial states
         for device in &devices_clone {
@@ -28,13 +29,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             debug!("Fetched properties for {}: {:?}", device.dsn, properties);
 
             // Publish initial state to MQTT
-            publish_device_state(&mqtt_client, device, &properties)
+            publish_device_state(&mqtt_client_clone, device, &properties)
                 .await
                 .unwrap();
             debug!("Published initial state for {}", device.dsn);
 
             // Subscribe to command topics for this device
-            subscribe_to_commands(&mqtt_client, &device.dsn)
+            subscribe_to_commands(&mqtt_client_clone, &device.dsn)
                 .await
                 .unwrap();
             debug!("Subscribed to command topics for {}", device.dsn);
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Handle MQTT events in a separate task
-    if let Err(e) = handle_mqtt_events(eventloop, devices).await {
+    if let Err(e) = handle_mqtt_events(&mqtt_client, eventloop, devices).await {
         eprintln!("Error handling MQTT events: {:?}", e);
     }
 

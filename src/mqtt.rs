@@ -1,4 +1,6 @@
-use crate::api::{set_device_intensity, set_device_power_state, DeviceInfo, PropertyInfo};
+use crate::api::{
+    fetch_device_properties, set_device_intensity, set_device_power_state, DeviceInfo, PropertyInfo,
+};
 use log::debug;
 use log::{info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
@@ -21,13 +23,14 @@ pub async fn publish_device_state(
     // Extract relevant properties
     let power_state = properties
         .iter()
-        .find(|p| p.name == "power_state")
-        .and_then(|p| p.value.as_bool())
+        .find(|p| p.name == "set_power_state")
+        .and_then(|p| p.value.as_u64())
+        .and_then(|v| Some(v == 1))
         .unwrap_or(false);
 
     let intensity_state = properties
         .iter()
-        .find(|p| p.name == "intensity_state")
+        .find(|p| p.name == "set_intensity_manual")
         .and_then(|p| p.value.as_u64())
         .unwrap_or(0);
 
@@ -41,6 +44,10 @@ pub async fn publish_device_state(
     mqtt_client
         .publish(state_topic.clone(), QoS::AtLeastOnce, false, payload)
         .await?;
+    debug!(
+        "Published state for {} to topic {}: {}",
+        device.product_name, state_topic, payload
+    );
 
     // Publish intensity as a separate topic
     let intensity_topic = format!("{}/intensity/state", base_topic);
@@ -52,6 +59,10 @@ pub async fn publish_device_state(
             intensity_state.to_string(),
         )
         .await?;
+    debug!(
+        "Published intensity state for {} to topic {}: {}",
+        device.product_name, intensity_topic, intensity_state
+    );
 
     // For Home Assistant discovery, publish config topics
     let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
@@ -143,6 +154,7 @@ pub async fn subscribe_to_commands(
 }
 
 pub async fn handle_mqtt_events(
+    mqtt_client: &AsyncClient,
     mut eventloop: EventLoop,
     devices: Vec<DeviceInfo>,
 ) -> Result<(), Box<dyn Error>> {
@@ -172,6 +184,10 @@ pub async fn handle_mqtt_events(
                         }
                         _ => warn!("Unknown payload on power command topic: {}", payload),
                     }
+                    let properties = fetch_device_properties(&device.dsn).await?;
+                    debug!("Fetched properties: {:?}", properties);
+                    publish_device_state(&mqtt_client, device, &properties).await?;
+                    debug!("Published updated state for {}", device.dsn);
                 } else if topic == intensity_command_topic {
                     info!(
                         "Received intensity command for {}: {}",
@@ -182,6 +198,10 @@ pub async fn handle_mqtt_events(
                     } else {
                         warn!("Invalid intensity value: {}", payload);
                     }
+                    let properties = fetch_device_properties(&device.dsn).await?;
+                    debug!("Fetched properties: {:?}", properties);
+                    publish_device_state(&mqtt_client, device, &properties).await?;
+                    debug!("Published updated state for {}", device.dsn);
                 }
             }
         }
