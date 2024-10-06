@@ -1,4 +1,5 @@
 use crate::api::{set_device_intensity, set_device_power_state, DeviceInfo, PropertyInfo};
+use log::debug;
 use log::{info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, Packet, QoS};
 use serde_json::json;
@@ -69,12 +70,16 @@ pub async fn publish_device_state(
     });
     mqtt_client
         .publish(
-            config_topic,
+            config_topic.clone(),
             QoS::AtLeastOnce,
             false,
             config_payload.to_string(),
         )
         .await?;
+    debug!(
+        "Published switch config for {} to topic {}",
+        device.product_name, config_topic
+    );
 
     // Publish intensity control configuration
     let intensity_config_topic = format!("homeassistant/number/{}/config", device.dsn);
@@ -98,12 +103,16 @@ pub async fn publish_device_state(
     });
     mqtt_client
         .publish(
-            intensity_config_topic,
+            intensity_config_topic.clone(),
             QoS::AtLeastOnce,
             false,
             intensity_config_payload.to_string(),
         )
         .await?;
+    debug!(
+        "Published intensity config for {} to topic {}",
+        device.product_name, intensity_config_topic
+    );
 
     Ok(())
 }
@@ -113,14 +122,21 @@ pub async fn subscribe_to_commands(
     device_dsn: &str,
 ) -> Result<(), Box<dyn Error>> {
     let command_topic = format!("homeassistant/switch/{}/set", device_dsn);
+    debug!("Subscribing to command topic: {}", command_topic);
     mqtt_client
-        .subscribe(command_topic, QoS::AtLeastOnce)
+        .subscribe(command_topic.clone(), QoS::AtLeastOnce)
         .await?;
+    debug!("Subscribed to command topic: {}", command_topic);
 
+    debug!("Subscribing to intensity command topic: {}", command_topic);
     let intensity_command_topic = format!("homeassistant/switch/{}/intensity/set", device_dsn);
     mqtt_client
-        .subscribe(intensity_command_topic, QoS::AtLeastOnce)
+        .subscribe(intensity_command_topic.clone(), QoS::AtLeastOnce)
         .await?;
+    debug!(
+        "Subscribed to intensity command topic: {}",
+        intensity_command_topic
+    );
 
     Ok(())
 }
@@ -129,7 +145,9 @@ pub async fn handle_mqtt_events(
     mut eventloop: EventLoop,
     devices: Vec<DeviceInfo>,
 ) -> Result<(), Box<dyn Error>> {
+    debug!("Listening for MQTT events");
     while let Ok(notification) = eventloop.poll().await {
+        debug!("Received MQTT event: {:?}", notification);
         if let Event::Incoming(Packet::Publish(publish)) = notification {
             let topic = publish.topic.clone();
             let payload = String::from_utf8(publish.payload.to_vec())?;
