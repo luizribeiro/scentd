@@ -4,7 +4,6 @@ mod mqtt;
 use api::{fetch_device_properties, fetch_devices};
 use log::debug;
 use mqtt::{handle_mqtt_events, publish_device_state, subscribe_to_commands};
-use rumqttc::AsyncClient;
 use std::error::Error;
 use tokio::task;
 

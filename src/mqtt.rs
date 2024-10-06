@@ -1,10 +1,10 @@
 use crate::api::{set_device_intensity, set_device_power_state, DeviceInfo, PropertyInfo};
 use log::debug;
 use log::{info, warn};
-use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::error::Error;
-use tokio::time::{self, Duration};
+use tokio::time::Duration;
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     let mut mqttoptions = MqttOptions::new("fragrance_bridge", "localhost", 1883);
