@@ -1,10 +1,14 @@
 mod api;
 mod mqtt;
 
-use api::{fetch_device_properties, fetch_devices};
+use std::error::Error;
+
+use api::{fetch_device_properties, fetch_devices, login};
 use log::debug;
 use mqtt::{handle_mqtt_events, publish_device_state, subscribe_to_commands};
-use std::error::Error;
+use std::env;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::task;
 
 #[tokio::main]
@@ -12,8 +16,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize logging
     env_logger::init();
 
+    // Perform login to obtain tokens
+    let username = env::var("AERA_USERNAME").expect("AERA_USERNAME not set");
+    let password = env::var("AERA_PASSWORD").expect("AERA_PASSWORD not set");
+    let auth_tokens = Arc::new(Mutex::new(login(&username, &password).await?));
+
     // Fetch devices from the API
-    let devices = fetch_devices().await?;
+    let devices = fetch_devices(&auth_tokens).await?;
     debug!("Fetched devices: {:?}", devices);
 
     // Initialize MQTT client
@@ -21,11 +30,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let devices_clone = devices.clone();
     let mqtt_client_clone = mqtt_client.clone();
+    let auth_tokens_clone = auth_tokens.clone();
     task::spawn(async move {
         // Subscribe to command topics and publish initial states
         for device in &devices_clone {
             // Fetch device properties
-            let properties = fetch_device_properties(&device.dsn).await.unwrap();
+            let properties = fetch_device_properties(&auth_tokens_clone, &device.dsn)
+                .await
+                .unwrap();
             debug!("Fetched properties for {}: {:?}", device.dsn, properties);
 
             // Publish initial state to MQTT
@@ -44,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Handle MQTT events in a separate task
-    if let Err(e) = handle_mqtt_events(&mqtt_client, eventloop, devices).await {
+    if let Err(e) = handle_mqtt_events(auth_tokens, &mqtt_client, eventloop, devices).await {
         eprintln!("Error handling MQTT events: {:?}", e);
     }
 
