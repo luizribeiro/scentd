@@ -1,6 +1,6 @@
 use crate::api::{
-    fetch_device_properties, set_device_intensity, set_device_power_state, AuthTokens, DeviceInfo,
-    PropertyInfo,
+    fetch_device_properties, set_device_intensity, set_device_power_state, DeviceInfo,
+    PropertyInfo, Session,
 };
 use log::debug;
 use log::{info, warn};
@@ -157,7 +157,7 @@ pub async fn subscribe_to_commands(
 }
 
 pub async fn handle_mqtt_events(
-    auth_tokens: Arc<Mutex<AuthTokens>>,
+    session: Arc<Mutex<Session>>,
     mqtt_client: &AsyncClient,
     mut eventloop: EventLoop,
     devices: Vec<DeviceInfo>,
@@ -181,14 +181,14 @@ pub async fn handle_mqtt_events(
                     );
                     match payload.as_str() {
                         "ON" => {
-                            set_device_power_state(&auth_tokens, &device.dsn, true).await?;
+                            set_device_power_state(&session, &device.dsn, true).await?;
                         }
                         "OFF" => {
-                            set_device_power_state(&auth_tokens, &device.dsn, false).await?;
+                            set_device_power_state(&session, &device.dsn, false).await?;
                         }
                         _ => warn!("Unknown payload on power command topic: {}", payload),
                     }
-                    let properties = fetch_device_properties(&auth_tokens, &device.dsn).await?;
+                    let properties = fetch_device_properties(&session, &device.dsn).await?;
                     debug!("Fetched properties: {:?}", properties);
                     publish_device_state(&mqtt_client, device, &properties).await?;
                     debug!("Published updated state for {}", device.dsn);
@@ -198,11 +198,11 @@ pub async fn handle_mqtt_events(
                         device.product_name, payload
                     );
                     if let Ok(intensity) = payload.parse::<u8>() {
-                        set_device_intensity(&auth_tokens, &device.dsn, intensity).await?;
+                        set_device_intensity(&session, &device.dsn, intensity).await?;
                     } else {
                         warn!("Invalid intensity value: {}", payload);
                     }
-                    let properties = fetch_device_properties(&auth_tokens, &device.dsn).await?;
+                    let properties = fetch_device_properties(&session, &device.dsn).await?;
                     debug!("Fetched properties: {:?}", properties);
                     publish_device_state(&mqtt_client, device, &properties).await?;
                     debug!("Published updated state for {}", device.dsn);

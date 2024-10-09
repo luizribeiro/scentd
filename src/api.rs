@@ -74,7 +74,7 @@ struct Application {
     app_secret: String,
 }
 
-pub struct AuthTokens {
+pub struct Session {
     access_token: String,
     refresh_token: String,
     expires_at: u64, // Epoch time when the token expires
@@ -97,7 +97,7 @@ fn get_current_epoch() -> u64 {
         .as_secs()
 }
 
-pub async fn login(username: &str, password: &str) -> Result<AuthTokens, Box<dyn Error>> {
+pub async fn login(username: &str, password: &str) -> Result<Session, Box<dyn Error>> {
     let client = reqwest::Client::new();
     let url = "https://user-field.aylanetworks.com/users/sign_in.json";
 
@@ -123,7 +123,7 @@ pub async fn login(username: &str, password: &str) -> Result<AuthTokens, Box<dyn
         let auth_response: AuthResponse = response.json().await?;
         let expires_at = get_current_epoch() + auth_response.expires_in;
 
-        Ok(AuthTokens {
+        Ok(Session {
             access_token: auth_response.access_token,
             refresh_token: auth_response.refresh_token,
             expires_at,
@@ -133,10 +133,8 @@ pub async fn login(username: &str, password: &str) -> Result<AuthTokens, Box<dyn
     }
 }
 
-pub async fn ensure_token_valid(
-    auth_tokens: &Arc<Mutex<AuthTokens>>,
-) -> Result<(), Box<dyn Error>> {
-    let mut tokens = auth_tokens.lock().await;
+pub async fn ensure_session_valid(session: &Arc<Mutex<Session>>) -> Result<(), Box<dyn Error>> {
+    let mut tokens = session.lock().await;
     let current_time = get_current_epoch();
 
     if current_time >= tokens.expires_at {
@@ -147,20 +145,20 @@ pub async fn ensure_token_valid(
     Ok(())
 }
 
-pub async fn refresh_token(auth_tokens: &mut AuthTokens) -> Result<(), Box<dyn Error>> {
+pub async fn refresh_token(session: &mut Session) -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::new();
     let url = "https://user-field.aylanetworks.com/users/refresh_token.json";
 
     let refresh_request = RefreshTokenRequest {
         user: RefreshTokenUser {
-            refresh_token: auth_tokens.refresh_token.clone(),
+            refresh_token: session.refresh_token.clone(),
         },
     };
 
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
-        format!("auth_token {}", auth_tokens.access_token)
+        format!("auth_token {}", session.access_token)
             .parse()
             .unwrap(),
     );
@@ -177,9 +175,9 @@ pub async fn refresh_token(auth_tokens: &mut AuthTokens) -> Result<(), Box<dyn E
         let auth_response: AuthResponse = response.json().await?;
         let expires_at = get_current_epoch() + auth_response.expires_in;
 
-        auth_tokens.access_token = auth_response.access_token;
-        auth_tokens.refresh_token = auth_response.refresh_token;
-        auth_tokens.expires_at = expires_at;
+        session.access_token = auth_response.access_token;
+        session.refresh_token = auth_response.refresh_token;
+        session.expires_at = expires_at;
 
         Ok(())
     } else {
@@ -187,12 +185,12 @@ pub async fn refresh_token(auth_tokens: &mut AuthTokens) -> Result<(), Box<dyn E
     }
 }
 
-pub async fn get_auth_headers(auth_tokens: &Arc<Mutex<AuthTokens>>) -> HeaderMap {
+pub async fn get_auth_headers(session: &Arc<Mutex<Session>>) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let auth_tokens = auth_tokens.lock().await;
+    let session = session.lock().await;
     headers.insert(
         AUTHORIZATION,
-        format!("auth_token {}", auth_tokens.access_token)
+        format!("auth_token {}", session.access_token)
             .parse()
             .unwrap(),
     );
@@ -200,13 +198,13 @@ pub async fn get_auth_headers(auth_tokens: &Arc<Mutex<AuthTokens>>) -> HeaderMap
 }
 
 pub async fn fetch_devices(
-    auth_tokens: &Arc<Mutex<AuthTokens>>,
+    session: &Arc<Mutex<Session>>,
 ) -> Result<Vec<DeviceInfo>, Box<dyn Error>> {
-    ensure_token_valid(auth_tokens).await?;
+    ensure_session_valid(session).await?;
     let client = reqwest::Client::new();
     let response = client
         .get("https://ads-field.aylanetworks.com/apiv1/devices.json")
-        .headers(get_auth_headers(auth_tokens).await)
+        .headers(get_auth_headers(session).await)
         .send()
         .await?;
 
@@ -215,7 +213,7 @@ pub async fn fetch_devices(
 }
 
 pub async fn fetch_device_properties(
-    auth_tokens: &Arc<Mutex<AuthTokens>>,
+    session: &Arc<Mutex<Session>>,
     dsn: &str,
 ) -> Result<Vec<PropertyInfo>, Box<dyn Error>> {
     let client = reqwest::Client::new();
@@ -225,7 +223,7 @@ pub async fn fetch_device_properties(
     );
     let response = client
         .get(&url)
-        .headers(get_auth_headers(auth_tokens).await)
+        .headers(get_auth_headers(session).await)
         .send()
         .await?;
 
@@ -234,7 +232,7 @@ pub async fn fetch_device_properties(
 }
 
 pub async fn set_device_power_state(
-    auth_tokens: &Arc<Mutex<AuthTokens>>,
+    session: &Arc<Mutex<Session>>,
     dsn: &str,
     state: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -250,7 +248,7 @@ pub async fn set_device_power_state(
         },
     };
 
-    let mut headers = get_auth_headers(auth_tokens).await;
+    let mut headers = get_auth_headers(session).await;
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
     client
@@ -264,7 +262,7 @@ pub async fn set_device_power_state(
 }
 
 pub async fn set_device_intensity(
-    auth_tokens: &Arc<Mutex<AuthTokens>>,
+    session: &Arc<Mutex<Session>>,
     dsn: &str,
     intensity: u8,
 ) -> Result<(), Box<dyn Error>> {
@@ -284,7 +282,7 @@ pub async fn set_device_intensity(
         },
     };
 
-    let mut headers = get_auth_headers(auth_tokens).await;
+    let mut headers = get_auth_headers(session).await;
     headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
     client
