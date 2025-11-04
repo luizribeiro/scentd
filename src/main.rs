@@ -7,10 +7,11 @@ use std::error::Error;
 type BoxError = Box<dyn Error + Send + Sync>;
 
 use api::{fetch_device_properties, fetch_devices, login};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
 use std::env;
 use std::sync::Arc;
+use tokio::signal;
 use tokio::sync::Mutex;
 use tokio::task;
 
@@ -85,14 +86,29 @@ async fn main() -> Result<(), BoxError> {
         periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
     });
 
-    // Handle MQTT events in the main loop
+    // Handle MQTT events in a task so we can wait for shutdown signals
     info!("Starting MQTT event handler");
-    if let Err(e) = handle_mqtt_events(session, &mqtt_client, eventloop, devices).await {
-        error!("MQTT event handler exited with error: {}", e);
-        return Err(e);
-    }
+    let mqtt_handle = task::spawn(async move {
+        if let Err(e) = handle_mqtt_events(session, &mqtt_client, eventloop, devices).await {
+            error!("MQTT event handler exited with error: {}", e);
+            return Err(e);
+        }
+        Ok(())
+    });
 
-    // If we get here, the event loop exited cleanly (which shouldn't happen in normal operation)
-    error!("MQTT event handler exited unexpectedly");
-    Ok(())
+    // Wait for shutdown signal
+    match signal::ctrl_c().await {
+        Ok(()) => {
+            info!("Received shutdown signal (SIGINT/SIGTERM)");
+            info!("Shutting down gracefully...");
+            // Abort the MQTT handler task
+            mqtt_handle.abort();
+            info!("Shutdown complete");
+            Ok(())
+        }
+        Err(err) => {
+            error!("Failed to listen for shutdown signal: {}", err);
+            Err(err.into())
+        }
+    }
 }
