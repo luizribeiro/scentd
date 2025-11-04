@@ -167,7 +167,13 @@ pub async fn handle_mqtt_events(
         debug!("Received MQTT event: {:?}", notification);
         if let Event::Incoming(Packet::Publish(publish)) = notification {
             let topic = publish.topic.clone();
-            let payload = String::from_utf8(publish.payload.to_vec())?;
+            let payload = match String::from_utf8(publish.payload.to_vec()) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to parse MQTT payload as UTF-8: {}", e);
+                    continue;
+                }
+            };
 
             for device in &devices {
                 let base_topic = format!("homeassistant/switch/{}", device.dsn);
@@ -179,33 +185,65 @@ pub async fn handle_mqtt_events(
                         "Received power command for {}: {}",
                         device.product_name, payload
                     );
-                    match payload.as_str() {
-                        "ON" => {
-                            set_device_power_state(&session, &device.dsn, true).await?;
+                    let state = match payload.as_str() {
+                        "ON" => Some(true),
+                        "OFF" => Some(false),
+                        _ => {
+                            warn!("Unknown payload on power command topic: {}", payload);
+                            None
                         }
-                        "OFF" => {
-                            set_device_power_state(&session, &device.dsn, false).await?;
+                    };
+
+                    if let Some(state) = state {
+                        if let Err(e) = set_device_power_state(&session, &device.dsn, state).await {
+                            warn!("Failed to set power state for {}: {}", device.dsn, e);
+                            continue;
                         }
-                        _ => warn!("Unknown payload on power command topic: {}", payload),
                     }
-                    let properties = fetch_device_properties(&session, &device.dsn).await?;
-                    debug!("Fetched properties: {:?}", properties);
-                    publish_device_state(&mqtt_client, device, &properties).await?;
-                    debug!("Published updated state for {}", device.dsn);
+
+                    // Fetch and publish updated state
+                    match fetch_device_properties(&session, &device.dsn).await {
+                        Ok(properties) => {
+                            debug!("Fetched properties: {:?}", properties);
+                            if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
+                                warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                            } else {
+                                debug!("Published updated state for {}", device.dsn);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                        }
+                    }
                 } else if topic == intensity_command_topic {
                     info!(
                         "Received intensity command for {}: {}",
                         device.product_name, payload
                     );
                     if let Ok(intensity) = payload.parse::<u8>() {
-                        set_device_intensity(&session, &device.dsn, intensity).await?;
+                        if let Err(e) = set_device_intensity(&session, &device.dsn, intensity).await {
+                            warn!("Failed to set intensity for {}: {}", device.dsn, e);
+                            continue;
+                        }
                     } else {
                         warn!("Invalid intensity value: {}", payload);
+                        continue;
                     }
-                    let properties = fetch_device_properties(&session, &device.dsn).await?;
-                    debug!("Fetched properties: {:?}", properties);
-                    publish_device_state(&mqtt_client, device, &properties).await?;
-                    debug!("Published updated state for {}", device.dsn);
+
+                    // Fetch and publish updated state
+                    match fetch_device_properties(&session, &device.dsn).await {
+                        Ok(properties) => {
+                            debug!("Fetched properties: {:?}", properties);
+                            if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
+                                warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                            } else {
+                                debug!("Published updated state for {}", device.dsn);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                        }
+                    }
                 }
             }
         }
