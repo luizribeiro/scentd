@@ -13,7 +13,9 @@ use tokio::time::Duration;
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     let mut mqttoptions = MqttOptions::new("scentd", "localhost", 1883);
-    mqttoptions.set_keep_alive(Duration::from_secs(5));
+    // Set keep-alive to 60 seconds (was 5s, which was too aggressive)
+    // This reduces unnecessary network traffic and connection churn
+    mqttoptions.set_keep_alive(Duration::from_secs(60));
 
     AsyncClient::new(mqttoptions, 10)
 }
@@ -344,11 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mqtt_keep_alive() {
-        let (_, _eventloop) = get_mqtt_client();
-        // Just verify we can create the client
-        // In actual code, keep_alive is 5 seconds which is documented as potentially too aggressive
-        assert!(true);
+    fn test_mqtt_client_creation() {
+        let (_client, _eventloop) = get_mqtt_client();
+        // Verify we can create the client successfully
+        // Keep-alive is set to 60 seconds for reasonable connection management
+        // This test ensures MQTT client initialization doesn't panic
     }
 
     #[tokio::test]
