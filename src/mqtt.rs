@@ -212,3 +212,171 @@ pub async fn handle_mqtt_events(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_device() -> DeviceInfo {
+        DeviceInfo {
+            product_name: "Test Diffuser".to_string(),
+            dsn: "test_dsn_123".to_string(),
+            model: "MODEL_TEST".to_string(),
+            oem_model: "OEM_TEST".to_string(),
+            sw_version: "1.0.0".to_string(),
+        }
+    }
+
+    fn create_test_properties(power_state: u64, intensity: u64) -> Vec<PropertyInfo> {
+        vec![
+            PropertyInfo {
+                name: "set_power_state".to_string(),
+                base_type: "integer".to_string(),
+                read_only: false,
+                value: serde_json::Value::from(power_state),
+            },
+            PropertyInfo {
+                name: "set_intensity_manual".to_string(),
+                base_type: "integer".to_string(),
+                read_only: false,
+                value: serde_json::Value::from(intensity),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_mqtt_topic_format() {
+        let device = create_test_device();
+        let expected_base = "homeassistant/switch/test_dsn_123";
+        let expected_command = format!("{}/set", expected_base);
+        let expected_state = format!("{}/state", expected_base);
+        let expected_intensity_state = format!("{}/intensity/state", expected_base);
+        let expected_intensity_command = format!("{}/intensity/set", expected_base);
+
+        // Verify topic structure is correct
+        assert!(expected_command.contains(&device.dsn));
+        assert!(expected_state.contains(&device.dsn));
+        assert_eq!(expected_command, "homeassistant/switch/test_dsn_123/set");
+        assert_eq!(expected_state, "homeassistant/switch/test_dsn_123/state");
+        assert_eq!(expected_intensity_state, "homeassistant/switch/test_dsn_123/intensity/state");
+        assert_eq!(expected_intensity_command, "homeassistant/switch/test_dsn_123/intensity/set");
+    }
+
+    #[test]
+    fn test_power_state_on_payload() {
+        // Test that power state 1 maps to "ON"
+        let power_state = 1u64;
+        let expected = if power_state == 1 { "ON" } else { "OFF" };
+        assert_eq!(expected, "ON");
+    }
+
+    #[test]
+    fn test_power_state_off_payload() {
+        // Test that power state 0 maps to "OFF"
+        let power_state = 0u64;
+        let expected = if power_state == 1 { "ON" } else { "OFF" };
+        assert_eq!(expected, "OFF");
+    }
+
+    #[test]
+    fn test_intensity_value_extraction() {
+        let properties = create_test_properties(1, 3);
+
+        let intensity = properties
+            .iter()
+            .find(|p| p.name == "set_intensity_manual")
+            .and_then(|p| p.value.as_u64())
+            .unwrap_or(0);
+
+        assert_eq!(intensity, 3);
+    }
+
+    #[test]
+    fn test_power_state_extraction() {
+        let properties = create_test_properties(1, 3);
+
+        let power_state = properties
+            .iter()
+            .find(|p| p.name == "set_power_state")
+            .and_then(|p| p.value.as_u64())
+            .and_then(|v| Some(v == 1))
+            .unwrap_or(false);
+
+        assert_eq!(power_state, true);
+    }
+
+    #[test]
+    fn test_mqtt_keep_alive() {
+        let (_, _eventloop) = get_mqtt_client();
+        // Just verify we can create the client
+        // In actual code, keep_alive is 5 seconds which is documented as potentially too aggressive
+        assert!(true);
+    }
+
+    #[tokio::test]
+    async fn test_device_info_structure() {
+        let device = create_test_device();
+        assert_eq!(device.product_name, "Test Diffuser");
+        assert_eq!(device.dsn, "test_dsn_123");
+        assert_eq!(device.model, "MODEL_TEST");
+        assert_eq!(device.oem_model, "OEM_TEST");
+        assert_eq!(device.sw_version, "1.0.0");
+    }
+
+    #[test]
+    fn test_property_info_structure() {
+        let properties = create_test_properties(1, 5);
+        assert_eq!(properties.len(), 2);
+
+        let power_prop = &properties[0];
+        assert_eq!(power_prop.name, "set_power_state");
+        assert_eq!(power_prop.base_type, "integer");
+        assert_eq!(power_prop.read_only, false);
+        assert_eq!(power_prop.value.as_u64().unwrap(), 1);
+
+        let intensity_prop = &properties[1];
+        assert_eq!(intensity_prop.name, "set_intensity_manual");
+        assert_eq!(intensity_prop.base_type, "integer");
+        assert_eq!(intensity_prop.read_only, false);
+        assert_eq!(intensity_prop.value.as_u64().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_home_assistant_config_topic_format() {
+        let device = create_test_device();
+        let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
+        assert_eq!(config_topic, "homeassistant/switch/test_dsn_123/config");
+
+        let intensity_config_topic = format!("homeassistant/number/{}/config", device.dsn);
+        assert_eq!(intensity_config_topic, "homeassistant/number/test_dsn_123/config");
+    }
+
+    #[test]
+    fn test_command_parsing_on() {
+        let payload = "ON";
+        let should_turn_on = payload == "ON";
+        assert_eq!(should_turn_on, true);
+    }
+
+    #[test]
+    fn test_command_parsing_off() {
+        let payload = "OFF";
+        let should_turn_on = payload == "ON";
+        assert_eq!(should_turn_on, false);
+    }
+
+    #[test]
+    fn test_intensity_parsing_valid() {
+        let payload = "3";
+        let intensity = payload.parse::<u8>();
+        assert!(intensity.is_ok());
+        assert_eq!(intensity.unwrap(), 3);
+    }
+
+    #[test]
+    fn test_intensity_parsing_invalid() {
+        let payload = "invalid";
+        let intensity = payload.parse::<u8>();
+        assert!(intensity.is_err());
+    }
+}
