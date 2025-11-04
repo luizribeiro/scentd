@@ -3,6 +3,7 @@ use std::error::Error;
 // Type alias for Send+Sync errors to work with tokio::spawn
 type BoxError = Box<dyn Error + Send + Sync>;
 
+use log::{debug, info, warn};
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -176,7 +177,12 @@ pub async fn ensure_session_valid(session: &Arc<Mutex<Session>>) -> Result<(), B
 
     if current_time >= tokens.expires_at {
         // Token has expired, refresh it
+        info!("Token expired, refreshing...");
         refresh_token(&mut tokens).await?;
+        info!("Token refreshed successfully");
+    } else {
+        let time_until_expiry = tokens.expires_at - current_time;
+        debug!("Token valid for {} more seconds", time_until_expiry);
     }
 
     Ok(())
@@ -187,6 +193,7 @@ impl ApiClient {
         let client = reqwest::Client::new();
         let url = format!("{}/users/refresh_token.json", self.user_base_url);
 
+        debug!("Refreshing authentication token");
         let refresh_request = RefreshTokenRequest {
             user: RefreshTokenUser {
                 refresh_token: session.refresh_token.clone(),
@@ -212,14 +219,18 @@ impl ApiClient {
         if response.status().is_success() {
             let auth_response: AuthResponse = response.json().await?;
             let expires_at = get_current_epoch() + auth_response.expires_in;
+            let expires_in_hours = auth_response.expires_in / 3600;
 
             session.access_token = auth_response.access_token;
             session.refresh_token = auth_response.refresh_token;
             session.expires_at = expires_at;
 
+            info!("Token refresh successful (expires in {} hours)", expires_in_hours);
             Ok(())
         } else {
-            Err(format!("Token refresh failed with status: {}", response.status()).into())
+            let status = response.status();
+            warn!("Token refresh failed with status: {}", status);
+            Err(format!("Token refresh failed with status: {}", status).into())
         }
     }
 }
