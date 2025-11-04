@@ -36,37 +36,32 @@ async fn main() -> Result<(), BoxError> {
 
     // Initialize MQTT client
     info!("Connecting to MQTT broker");
-    let (mqtt_client, eventloop) = mqtt::get_mqtt_client();
+    let (mqtt_client, mut eventloop) = mqtt::get_mqtt_client();
 
-    // Handle MQTT events in a task so we can wait for shutdown signals
-    info!("Starting MQTT event handler");
-    let session_events = session.clone();
-    let devices_events = devices.clone();
-    let mqtt_client_events = mqtt_client.clone();
-    let mqtt_handle = task::spawn(async move {
-        if let Err(e) = handle_mqtt_events(session_events, &mqtt_client_events, eventloop, devices_events).await {
-            error!("MQTT event handler exited with error: {}", e);
-            return Err(e);
+    // Verify MQTT connection by polling once
+    // This ensures we fail fast if the broker is unreachable
+    match eventloop.poll().await {
+        Ok(_) => {
+            info!("Successfully connected to MQTT broker");
         }
-        Ok(())
-    });
-
-    // Wait for MQTT event loop to be ready
-    // 500ms should be plenty for the event loop to start processing
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        Err(e) => {
+            error!("Failed to connect to MQTT broker: {}", e);
+            return Err(format!("MQTT connection failed: {}", e).into());
+        }
+    }
 
     // Spawn initialization task
-    let devices_init = devices.clone();
-    let mqtt_client_init = mqtt_client.clone();
-    let session_init = session.clone();
+    let devices_clone = devices.clone();
+    let mqtt_client_clone = mqtt_client.clone();
+    let session_clone = session.clone();
     task::spawn(async move {
         info!("Starting device initialization");
         // Subscribe to command topics and publish initial states
-        for device in &devices_init {
+        for device in &devices_clone {
             info!("Initializing device: {} ({})", device.product_name, device.dsn);
 
             // Fetch device properties
-            let properties = match fetch_device_properties(&session_init, &device.dsn).await {
+            let properties = match fetch_device_properties(&session_clone, &device.dsn).await {
                 Ok(props) => props,
                 Err(e) => {
                     error!("Failed to fetch properties for {}: {}", device.dsn, e);
@@ -76,7 +71,7 @@ async fn main() -> Result<(), BoxError> {
             debug!("Fetched properties for {}: {:?}", device.dsn, properties);
 
             // Publish initial state to MQTT
-            if let Err(e) = publish_device_state(&mqtt_client_init, device, &properties).await {
+            if let Err(e) = publish_device_state(&mqtt_client_clone, device, &properties).await {
                 error!("Failed to publish initial state for {}: {}", device.dsn, e);
                 // Continue anyway - we can try again later
             } else {
@@ -84,7 +79,7 @@ async fn main() -> Result<(), BoxError> {
             }
 
             // Subscribe to command topics for this device
-            if let Err(e) = subscribe_to_commands(&mqtt_client_init, &device.dsn).await {
+            if let Err(e) = subscribe_to_commands(&mqtt_client_clone, &device.dsn).await {
                 error!("Failed to subscribe to commands for {}: {}", device.dsn, e);
                 // Continue anyway - device might still work
             } else {
@@ -92,6 +87,19 @@ async fn main() -> Result<(), BoxError> {
             }
         }
         info!("Device initialization complete");
+    });
+
+    // Handle MQTT events in a task so we can wait for shutdown signals
+    info!("Starting MQTT event handler");
+    let session_clone = session.clone();
+    let devices_clone = devices.clone();
+    let mqtt_client_clone = mqtt_client.clone();
+    let mqtt_handle = task::spawn(async move {
+        if let Err(e) = handle_mqtt_events(session_clone, &mqtt_client_clone, eventloop, devices_clone).await {
+            error!("MQTT event handler exited with error: {}", e);
+            return Err(e);
+        }
+        Ok(())
     });
 
     // Spawn periodic state poller to keep Home Assistant in sync
