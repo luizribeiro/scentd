@@ -55,23 +55,23 @@ pub async fn publish_device_state(
     let state_topic = format!("{}/state", base_topic);
     let command_topic = format!("{}/set", base_topic);
 
-    // Publish state
+    // Publish state (retained so Home Assistant gets it immediately on restart)
     let payload = if power_state { "ON" } else { "OFF" };
     mqtt_client
-        .publish(state_topic.clone(), QoS::AtLeastOnce, false, payload)
+        .publish(state_topic.clone(), QoS::AtLeastOnce, true, payload)
         .await?;
     debug!(
         "Published state for {} to topic {}: {}",
         device.product_name, state_topic, payload
     );
 
-    // Publish intensity as a separate topic
+    // Publish intensity as a separate topic (retained so Home Assistant gets it immediately on restart)
     let intensity_topic = format!("{}/intensity/state", base_topic);
     mqtt_client
         .publish(
             intensity_topic.clone(),
             QoS::AtLeastOnce,
-            false,
+            true,
             intensity_state.to_string(),
         )
         .await?;
@@ -80,7 +80,7 @@ pub async fn publish_device_state(
         device.product_name, intensity_topic, intensity_state
     );
 
-    // For Home Assistant discovery, publish config topics
+    // For Home Assistant discovery, publish config topics (retained so they persist across HA restarts)
     let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
     let config_payload = json!({
         "name": "Diffuser",
@@ -99,7 +99,7 @@ pub async fn publish_device_state(
         .publish(
             config_topic.clone(),
             QoS::AtLeastOnce,
-            false,
+            true,
             config_payload.to_string(),
         )
         .await?;
@@ -109,7 +109,7 @@ pub async fn publish_device_state(
     );
     debug!("Config payload: {}", config_payload);
 
-    // Publish intensity control configuration
+    // Publish intensity control configuration (retained so it persists across HA restarts)
     let intensity_config_topic = format!("homeassistant/number/{}/config", device.dsn);
     let intensity_command_topic = format!("{}/intensity/set", base_topic);
     let intensity_config_payload = json!({
@@ -133,7 +133,7 @@ pub async fn publish_device_state(
         .publish(
             intensity_config_topic.clone(),
             QoS::AtLeastOnce,
-            false,
+            true,
             intensity_config_payload.to_string(),
         )
         .await?;
