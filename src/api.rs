@@ -270,6 +270,7 @@ impl ApiClient {
         session: &Arc<Mutex<Session>>,
         dsn: &str,
     ) -> Result<Vec<PropertyInfo>, Box<dyn Error>> {
+        ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!(
             "{}/apiv1/dsns/{}/properties.json",
@@ -301,6 +302,7 @@ impl ApiClient {
         dsn: &str,
         state: bool,
     ) -> Result<(), Box<dyn Error>> {
+        ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!(
             "{}/apiv1/dsns/{}/properties/set_power_state/datapoints.json",
@@ -347,6 +349,7 @@ impl ApiClient {
             return Err(format!("Intensity must be between 1 and 5").into());
         }
 
+        ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!(
             "{}/apiv1/dsns/{}/properties/set_intensity_manual/datapoints.json",
