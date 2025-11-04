@@ -252,6 +252,10 @@ impl ApiClient {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch devices: {}", response.status()).into());
+        }
+
         let devices: Vec<Device> = response.json().await?;
         Ok(devices.into_iter().map(|d| d.device).collect())
     }
@@ -281,6 +285,10 @@ impl ApiClient {
             .headers(get_auth_headers(session).await)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch device properties for {}: {}", dsn, response.status()).into());
+        }
 
         let properties: Vec<Property> = response.json().await?;
         Ok(properties.into_iter().map(|p| p.property).collect())
@@ -318,12 +326,16 @@ impl ApiClient {
         let mut headers = get_auth_headers(session).await;
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
-        client
+        let response = client
             .post(&url)
             .headers(headers)
             .json(&payload)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to set power state for {}: {}", dsn, response.status()).into());
+        }
 
         Ok(())
     }
@@ -365,12 +377,16 @@ impl ApiClient {
         let mut headers = get_auth_headers(session).await;
         headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
 
-        client
+        let response = client
             .post(&url)
             .headers(headers)
             .json(&payload)
             .send()
             .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to set intensity for {}: {}", dsn, response.status()).into());
+        }
 
         Ok(())
     }
