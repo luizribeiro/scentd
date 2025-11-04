@@ -2,14 +2,16 @@ use crate::api::{
     fetch_device_properties, set_device_intensity, set_device_power_state, DeviceInfo,
     PropertyInfo, Session,
 };
-use log::debug;
-use log::{info, warn};
+use log::{debug, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::error::Error;
+
+// Type alias for Send+Sync errors to work with tokio::spawn
+type BoxError = Box<dyn Error + Send + Sync>;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::Duration;
+use tokio::time::{interval, Duration};
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     let mut mqttoptions = MqttOptions::new("scentd", "localhost", 1883);
@@ -24,7 +26,7 @@ pub async fn publish_device_state(
     mqtt_client: &AsyncClient,
     device: &DeviceInfo,
     properties: &[PropertyInfo],
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
     // Extract relevant properties
     let power_state = properties
         .iter()
@@ -137,7 +139,7 @@ pub async fn publish_device_state(
 pub async fn subscribe_to_commands(
     mqtt_client: &AsyncClient,
     device_dsn: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
     let command_topic = format!("homeassistant/switch/{}/set", device_dsn);
     debug!("Subscribing to command topic: {}", command_topic);
     mqtt_client
@@ -158,12 +160,49 @@ pub async fn subscribe_to_commands(
     Ok(())
 }
 
+/// Periodically polls device state and publishes to MQTT
+/// This ensures Home Assistant stays in sync even when device state
+/// changes externally (via app, schedules, etc.)
+pub async fn periodic_state_poller(
+    session: Arc<Mutex<Session>>,
+    mqtt_client: AsyncClient,
+    devices: Vec<DeviceInfo>,
+    poll_interval_secs: u64,
+) {
+    let mut interval = interval(Duration::from_secs(poll_interval_secs));
+    info!(
+        "Starting periodic state poller (interval: {}s)",
+        poll_interval_secs
+    );
+
+    loop {
+        interval.tick().await;
+        debug!("Polling device states");
+
+        for device in &devices {
+            match fetch_device_properties(&session, &device.dsn).await {
+                Ok(properties) => {
+                    debug!("Polled properties for {}: {:?}", device.dsn, properties);
+                    if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
+                        warn!("Failed to publish polled state for {}: {}", device.dsn, e);
+                    } else {
+                        debug!("Published polled state for {}", device.dsn);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to poll properties for {}: {}", device.dsn, e);
+                }
+            }
+        }
+    }
+}
+
 pub async fn handle_mqtt_events(
     session: Arc<Mutex<Session>>,
     mqtt_client: &AsyncClient,
     mut eventloop: EventLoop,
     devices: Vec<DeviceInfo>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
     debug!("Listening for MQTT events");
     while let Ok(notification) = eventloop.poll().await {
         debug!("Received MQTT event: {:?}", notification);
@@ -418,5 +457,30 @@ mod tests {
         let payload = "invalid";
         let intensity = payload.parse::<u8>();
         assert!(intensity.is_err());
+    }
+
+    #[test]
+    fn test_poll_interval_calculation() {
+        // Test that 5 minutes = 300 seconds
+        let interval_minutes = 5;
+        let interval_seconds = interval_minutes * 60;
+        assert_eq!(interval_seconds, 300);
+    }
+
+    #[tokio::test]
+    async fn test_periodic_poller_signature() {
+        // Test that we can construct the parameters for periodic_state_poller
+        // This ensures the function signature is compatible with our usage
+
+        // We just verify the types compile correctly
+        // We can't test the actual polling logic without mocking the API
+        // and that would be complex, so we verify the function signature instead
+        let _types_check: fn(Arc<Mutex<Session>>, AsyncClient, Vec<DeviceInfo>, u64) -> _ =
+            periodic_state_poller;
+
+        // Verify we can create the necessary types
+        let devices = vec![create_test_device()];
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].dsn, "test_dsn_123");
     }
 }

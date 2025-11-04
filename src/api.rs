@@ -1,5 +1,8 @@
 use std::error::Error;
 
+// Type alias for Send+Sync errors to work with tokio::spawn
+type BoxError = Box<dyn Error + Send + Sync>;
+
 use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -124,7 +127,7 @@ fn get_current_epoch() -> u64 {
 }
 
 impl ApiClient {
-    pub async fn login(&self, username: &str, password: &str) -> Result<Session, Box<dyn Error>> {
+    pub async fn login(&self, username: &str, password: &str) -> Result<Session, BoxError> {
         let client = reqwest::Client::new();
         let url = format!("{}/users/sign_in.json", self.user_base_url);
 
@@ -162,12 +165,12 @@ impl ApiClient {
 }
 
 // Keep the old function for backwards compatibility
-pub async fn login(username: &str, password: &str) -> Result<Session, Box<dyn Error>> {
+pub async fn login(username: &str, password: &str) -> Result<Session, BoxError> {
     let client = ApiClient::default();
     client.login(username, password).await
 }
 
-pub async fn ensure_session_valid(session: &Arc<Mutex<Session>>) -> Result<(), Box<dyn Error>> {
+pub async fn ensure_session_valid(session: &Arc<Mutex<Session>>) -> Result<(), BoxError> {
     let mut tokens = session.lock().await;
     let current_time = get_current_epoch();
 
@@ -180,7 +183,7 @@ pub async fn ensure_session_valid(session: &Arc<Mutex<Session>>) -> Result<(), B
 }
 
 impl ApiClient {
-    pub async fn refresh_token(&self, session: &mut Session) -> Result<(), Box<dyn Error>> {
+    pub async fn refresh_token(&self, session: &mut Session) -> Result<(), BoxError> {
         let client = reqwest::Client::new();
         let url = format!("{}/users/refresh_token.json", self.user_base_url);
 
@@ -221,7 +224,7 @@ impl ApiClient {
     }
 }
 
-pub async fn refresh_token(session: &mut Session) -> Result<(), Box<dyn Error>> {
+pub async fn refresh_token(session: &mut Session) -> Result<(), BoxError> {
     let client = ApiClient::default();
     client.refresh_token(session).await
 }
@@ -242,7 +245,7 @@ impl ApiClient {
     pub async fn fetch_devices(
         &self,
         session: &Arc<Mutex<Session>>,
-    ) -> Result<Vec<DeviceInfo>, Box<dyn Error>> {
+    ) -> Result<Vec<DeviceInfo>, BoxError> {
         ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!("{}/apiv1/devices.json", self.device_base_url);
@@ -263,7 +266,7 @@ impl ApiClient {
 
 pub async fn fetch_devices(
     session: &Arc<Mutex<Session>>,
-) -> Result<Vec<DeviceInfo>, Box<dyn Error>> {
+) -> Result<Vec<DeviceInfo>, BoxError> {
     let client = ApiClient::default();
     client.fetch_devices(session).await
 }
@@ -273,7 +276,7 @@ impl ApiClient {
         &self,
         session: &Arc<Mutex<Session>>,
         dsn: &str,
-    ) -> Result<Vec<PropertyInfo>, Box<dyn Error>> {
+    ) -> Result<Vec<PropertyInfo>, BoxError> {
         ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!(
@@ -298,7 +301,7 @@ impl ApiClient {
 pub async fn fetch_device_properties(
     session: &Arc<Mutex<Session>>,
     dsn: &str,
-) -> Result<Vec<PropertyInfo>, Box<dyn Error>> {
+) -> Result<Vec<PropertyInfo>, BoxError> {
     let client = ApiClient::default();
     client.fetch_device_properties(session, dsn).await
 }
@@ -309,7 +312,7 @@ impl ApiClient {
         session: &Arc<Mutex<Session>>,
         dsn: &str,
         state: bool,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), BoxError> {
         ensure_session_valid(session).await?;
         let client = reqwest::Client::new();
         let url = format!(
@@ -345,7 +348,7 @@ pub async fn set_device_power_state(
     session: &Arc<Mutex<Session>>,
     dsn: &str,
     state: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
     let client = ApiClient::default();
     client.set_device_power_state(session, dsn, state).await
 }
@@ -356,7 +359,7 @@ impl ApiClient {
         session: &Arc<Mutex<Session>>,
         dsn: &str,
         intensity: u8,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), BoxError> {
         if intensity < 1 || intensity > 5 {
             return Err(format!("Intensity must be between 1 and 5").into());
         }
@@ -396,7 +399,7 @@ pub async fn set_device_intensity(
     session: &Arc<Mutex<Session>>,
     dsn: &str,
     intensity: u8,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), BoxError> {
     let client = ApiClient::default();
     client.set_device_intensity(session, dsn, intensity).await
 }

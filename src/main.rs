@@ -3,16 +3,19 @@ mod mqtt;
 
 use std::error::Error;
 
+// Type alias for Send+Sync errors to work with tokio::spawn
+type BoxError = Box<dyn Error + Send + Sync>;
+
 use api::{fetch_device_properties, fetch_devices, login};
 use log::{debug, error, info};
-use mqtt::{handle_mqtt_events, publish_device_state, subscribe_to_commands};
+use mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), BoxError> {
     // Initialize logging
     env_logger::init();
 
@@ -34,6 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Connecting to MQTT broker");
     let (mqtt_client, eventloop) = mqtt::get_mqtt_client();
 
+    // Spawn initialization task
     let devices_clone = devices.clone();
     let mqtt_client_clone = mqtt_client.clone();
     let session_clone = session.clone();
@@ -70,6 +74,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         info!("Device initialization complete");
+    });
+
+    // Spawn periodic state poller to keep Home Assistant in sync
+    // Polls every 5 minutes to detect external changes (app, schedules, etc.)
+    let devices_poller = devices.clone();
+    let mqtt_client_poller = mqtt_client.clone();
+    let session_poller = session.clone();
+    task::spawn(async move {
+        periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
     });
 
     // Handle MQTT events in the main loop
