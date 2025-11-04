@@ -7,7 +7,7 @@ use std::error::Error;
 type BoxError = Box<dyn Error + Send + Sync>;
 
 use api::{fetch_device_properties, fetch_devices, login};
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
 use std::env;
 use std::sync::Arc;
@@ -38,18 +38,34 @@ async fn main() -> Result<(), BoxError> {
     info!("Connecting to MQTT broker");
     let (mqtt_client, eventloop) = mqtt::get_mqtt_client();
 
+    // Handle MQTT events in a task so we can wait for shutdown signals
+    info!("Starting MQTT event handler");
+    let session_events = session.clone();
+    let devices_events = devices.clone();
+    let mqtt_client_events = mqtt_client.clone();
+    let mqtt_handle = task::spawn(async move {
+        if let Err(e) = handle_mqtt_events(session_events, &mqtt_client_events, eventloop, devices_events).await {
+            error!("MQTT event handler exited with error: {}", e);
+            return Err(e);
+        }
+        Ok(())
+    });
+
+    // Wait a moment for MQTT event loop to be ready
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     // Spawn initialization task
-    let devices_clone = devices.clone();
-    let mqtt_client_clone = mqtt_client.clone();
-    let session_clone = session.clone();
+    let devices_init = devices.clone();
+    let mqtt_client_init = mqtt_client.clone();
+    let session_init = session.clone();
     task::spawn(async move {
         info!("Starting device initialization");
         // Subscribe to command topics and publish initial states
-        for device in &devices_clone {
+        for device in &devices_init {
             info!("Initializing device: {} ({})", device.product_name, device.dsn);
 
             // Fetch device properties
-            let properties = match fetch_device_properties(&session_clone, &device.dsn).await {
+            let properties = match fetch_device_properties(&session_init, &device.dsn).await {
                 Ok(props) => props,
                 Err(e) => {
                     error!("Failed to fetch properties for {}: {}", device.dsn, e);
@@ -59,7 +75,7 @@ async fn main() -> Result<(), BoxError> {
             debug!("Fetched properties for {}: {:?}", device.dsn, properties);
 
             // Publish initial state to MQTT
-            if let Err(e) = publish_device_state(&mqtt_client_clone, device, &properties).await {
+            if let Err(e) = publish_device_state(&mqtt_client_init, device, &properties).await {
                 error!("Failed to publish initial state for {}: {}", device.dsn, e);
                 // Continue anyway - we can try again later
             } else {
@@ -67,7 +83,7 @@ async fn main() -> Result<(), BoxError> {
             }
 
             // Subscribe to command topics for this device
-            if let Err(e) = subscribe_to_commands(&mqtt_client_clone, &device.dsn).await {
+            if let Err(e) = subscribe_to_commands(&mqtt_client_init, &device.dsn).await {
                 error!("Failed to subscribe to commands for {}: {}", device.dsn, e);
                 // Continue anyway - device might still work
             } else {
@@ -79,21 +95,14 @@ async fn main() -> Result<(), BoxError> {
 
     // Spawn periodic state poller to keep Home Assistant in sync
     // Polls every 5 minutes to detect external changes (app, schedules, etc.)
-    let devices_poller = devices.clone();
+    // Wait 1 minute before starting to avoid startup congestion
     let mqtt_client_poller = mqtt_client.clone();
     let session_poller = session.clone();
+    let devices_poller = devices.clone();
     task::spawn(async move {
+        // Wait 1 minute before starting periodic polling
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
-    });
-
-    // Handle MQTT events in a task so we can wait for shutdown signals
-    info!("Starting MQTT event handler");
-    let mqtt_handle = task::spawn(async move {
-        if let Err(e) = handle_mqtt_events(session, &mqtt_client, eventloop, devices).await {
-            error!("MQTT event handler exited with error: {}", e);
-            return Err(e);
-        }
-        Ok(())
     });
 
     // Wait for shutdown signal
