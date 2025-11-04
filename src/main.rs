@@ -51,8 +51,9 @@ async fn main() -> Result<(), BoxError> {
         Ok(())
     });
 
-    // Wait a moment for MQTT event loop to be ready
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait for MQTT event loop to be ready
+    // 500ms should be plenty for the event loop to start processing
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Spawn initialization task
     let devices_init = devices.clone();

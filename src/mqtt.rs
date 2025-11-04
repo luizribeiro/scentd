@@ -14,7 +14,16 @@ use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
-    let mut mqttoptions = MqttOptions::new("scentd", "localhost", 1883);
+    // Read MQTT configuration from environment variables
+    let mqtt_host = std::env::var("MQTT_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let mqtt_port: u16 = std::env::var("MQTT_PORT")
+        .unwrap_or_else(|_| "1883".to_string())
+        .parse()
+        .unwrap_or(1883);
+
+    info!("Connecting to MQTT broker at {}:{}", mqtt_host, mqtt_port);
+
+    let mut mqttoptions = MqttOptions::new("scentd", mqtt_host, mqtt_port);
     // Set keep-alive to 60 seconds (was 5s, which was too aggressive)
     // This reduces unnecessary network traffic and connection churn
     mqttoptions.set_keep_alive(Duration::from_secs(60));
@@ -390,6 +399,30 @@ mod tests {
         // Verify we can create the client successfully
         // Keep-alive is set to 60 seconds for reasonable connection management
         // This test ensures MQTT client initialization doesn't panic
+    }
+
+    #[test]
+    fn test_mqtt_env_var_defaults() {
+        // Test that default values work when env vars not set
+        std::env::remove_var("MQTT_HOST");
+        std::env::remove_var("MQTT_PORT");
+
+        let (_client, _eventloop) = get_mqtt_client();
+        // Should succeed with defaults (localhost:1883)
+    }
+
+    #[test]
+    fn test_mqtt_custom_config() {
+        // Test that custom MQTT config can be set
+        std::env::set_var("MQTT_HOST", "mqtt.example.com");
+        std::env::set_var("MQTT_PORT", "8883");
+
+        let (_client, _eventloop) = get_mqtt_client();
+        // Should succeed with custom values
+
+        // Clean up
+        std::env::remove_var("MQTT_HOST");
+        std::env::remove_var("MQTT_PORT");
     }
 
     #[tokio::test]
