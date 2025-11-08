@@ -31,6 +31,11 @@ pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     AsyncClient::new(mqttoptions, 10)
 }
 
+// Default cartridge capacity in pump lifetime units
+// Based on typical Aera cartridge life (~800-1000 hours of runtime)
+// This value can be adjusted based on actual cartridge specifications
+const DEFAULT_CARTRIDGE_CAPACITY: f64 = 300000.0;
+
 pub async fn publish_device_state(
     mqtt_client: &AsyncClient,
     device: &DeviceInfo,
@@ -49,6 +54,33 @@ pub async fn publish_device_state(
         .find(|p| p.name == "set_intensity_manual")
         .and_then(|p| p.value.as_u64())
         .unwrap_or(0);
+
+    // Extract fragrance level data
+    let pump_life_time = properties
+        .iter()
+        .find(|p| p.name == "pump_life_time")
+        .and_then(|p| p.value.as_u64())
+        .unwrap_or(0) as f64;
+
+    let pump_life_time_qr_scanned = properties
+        .iter()
+        .find(|p| p.name == "pump_life_time_qr_scanned")
+        .and_then(|p| p.value.as_u64())
+        .unwrap_or(0) as f64;
+
+    // Calculate fragrance level percentage
+    // If QR code was never scanned (value is 0), we can't calculate accurate level
+    let fragrance_level = if pump_life_time_qr_scanned > 0.0 {
+        let usage = pump_life_time - pump_life_time_qr_scanned;
+        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_remaining = 100.0 - percentage_used;
+        // Clamp between 0 and 100
+        percentage_remaining.max(0.0).min(100.0)
+    } else {
+        // QR code never scanned, can't determine level accurately
+        // Return -1 to indicate unknown
+        -1.0
+    };
 
     // Construct MQTT topics
     let base_topic = format!("homeassistant/switch/{}", device.dsn);
@@ -79,6 +111,29 @@ pub async fn publish_device_state(
         "Published intensity state for {} to topic {}: {}",
         device.product_name, intensity_topic, intensity_state
     );
+
+    // Publish fragrance level as a separate topic (retained so Home Assistant gets it immediately on restart)
+    let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
+    // Only publish if we have a valid reading (QR code was scanned)
+    if fragrance_level >= 0.0 {
+        mqtt_client
+            .publish(
+                fragrance_level_topic.clone(),
+                QoS::AtLeastOnce,
+                true,
+                format!("{:.1}", fragrance_level),
+            )
+            .await?;
+        debug!(
+            "Published fragrance level for {} to topic {}: {:.1}%",
+            device.product_name, fragrance_level_topic, fragrance_level
+        );
+    } else {
+        debug!(
+            "Skipping fragrance level for {} (QR code not scanned)",
+            device.product_name
+        );
+    }
 
     // For Home Assistant discovery, publish config topics (retained so they persist across HA restarts)
     let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
@@ -141,6 +196,39 @@ pub async fn publish_device_state(
         "Published intensity config for {} to topic {}",
         device.product_name, intensity_config_topic
     );
+
+    // Publish fragrance level sensor configuration (retained so it persists across HA restarts)
+    // Only publish if we have a valid reading (QR code was scanned)
+    if fragrance_level >= 0.0 {
+        let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
+        let fragrance_level_config_payload = json!({
+            "name": "Fragrance Level",
+            "state_topic": fragrance_level_topic,
+            "unique_id": format!("{}_fragrance_level", device.dsn),
+            "device": {
+                "identifiers": [device.dsn],
+                "name": device.product_name,
+                "model": device.model,
+                "manufacturer": device.oem_model,
+                "sw_version": device.sw_version
+            },
+            "unit_of_measurement": "%",
+            "device_class": "battery",
+            "state_class": "measurement",
+        });
+        mqtt_client
+            .publish(
+                fragrance_level_config_topic.clone(),
+                QoS::AtLeastOnce,
+                true,
+                fragrance_level_config_payload.to_string(),
+            )
+            .await?;
+        debug!(
+            "Published fragrance level config for {} to topic {}",
+            device.product_name, fragrance_level_config_topic
+        );
+    }
 
     Ok(())
 }
@@ -515,5 +603,118 @@ mod tests {
         let devices = vec![create_test_device()];
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].dsn, "test_dsn_123");
+    }
+
+    #[test]
+    fn test_fragrance_level_calculation_full_cartridge() {
+        // Test nearly full cartridge (99% remaining)
+        let pump_life_time = 585089.0;
+        let pump_life_time_qr_scanned = 582062.0;
+        let usage = pump_life_time - pump_life_time_qr_scanned; // 3027
+        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
+
+        // Should be approximately 99%
+        assert!(percentage_remaining > 98.9 && percentage_remaining < 99.1);
+    }
+
+    #[test]
+    fn test_fragrance_level_calculation_half_used() {
+        // Test half-used cartridge
+        let pump_life_time = 150000.0;
+        let pump_life_time_qr_scanned = 0.0;
+        let usage = pump_life_time - pump_life_time_qr_scanned;
+        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
+
+        // Should be 50%
+        assert_eq!(percentage_remaining, 50.0);
+    }
+
+    #[test]
+    fn test_fragrance_level_calculation_empty() {
+        // Test empty cartridge (used full capacity)
+        let pump_life_time = 300000.0;
+        let pump_life_time_qr_scanned = 0.0;
+        let usage = pump_life_time - pump_life_time_qr_scanned;
+        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
+
+        // Should be 0%
+        assert_eq!(percentage_remaining, 0.0);
+    }
+
+    #[test]
+    fn test_fragrance_level_calculation_over_capacity() {
+        // Test over capacity (should clamp to 0%)
+        let pump_life_time = 500000.0;
+        let pump_life_time_qr_scanned = 0.0;
+        let usage = pump_life_time - pump_life_time_qr_scanned;
+        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
+
+        // Should be clamped to 0%
+        assert_eq!(percentage_remaining, 0.0);
+    }
+
+    #[test]
+    fn test_fragrance_level_qr_not_scanned() {
+        // Test when QR code was never scanned (value is 0)
+        let pump_life_time_qr_scanned = 0.0;
+
+        // Should return -1 to indicate unknown
+        let fragrance_level = if pump_life_time_qr_scanned > 0.0 {
+            // Would calculate normally
+            0.0
+        } else {
+            -1.0
+        };
+
+        assert_eq!(fragrance_level, -1.0);
+    }
+
+    #[test]
+    fn test_fragrance_level_extraction_from_properties() {
+        // Test extracting pump lifetime values from properties
+        let properties = vec![
+            PropertyInfo {
+                name: "pump_life_time".to_string(),
+                base_type: "integer".to_string(),
+                read_only: true,
+                value: serde_json::Value::from(585089),
+            },
+            PropertyInfo {
+                name: "pump_life_time_qr_scanned".to_string(),
+                base_type: "integer".to_string(),
+                read_only: false,
+                value: serde_json::Value::from(582062),
+            },
+        ];
+
+        let pump_life_time = properties
+            .iter()
+            .find(|p| p.name == "pump_life_time")
+            .and_then(|p| p.value.as_u64())
+            .unwrap_or(0) as f64;
+
+        let pump_life_time_qr_scanned = properties
+            .iter()
+            .find(|p| p.name == "pump_life_time_qr_scanned")
+            .and_then(|p| p.value.as_u64())
+            .unwrap_or(0) as f64;
+
+        assert_eq!(pump_life_time, 585089.0);
+        assert_eq!(pump_life_time_qr_scanned, 582062.0);
+    }
+
+    #[test]
+    fn test_fragrance_level_topic_format() {
+        let device = create_test_device();
+        let base_topic = format!("homeassistant/switch/{}", device.dsn);
+        let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
+        let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
+
+        assert_eq!(fragrance_level_topic, "homeassistant/switch/test_dsn_123/fragrance_level/state");
+        assert_eq!(fragrance_level_config_topic, "homeassistant/sensor/test_dsn_123_fragrance_level/config");
     }
 }

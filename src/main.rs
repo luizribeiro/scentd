@@ -1,14 +1,11 @@
-mod api;
-mod mqtt;
-
 use std::error::Error;
 
 // Type alias for Send+Sync errors to work with tokio::spawn
 type BoxError = Box<dyn Error + Send + Sync>;
 
-use api::{fetch_device_properties, fetch_devices, login};
 use log::{debug, error, info};
-use mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
+use scentd::api::{fetch_device_properties, fetch_devices, login};
+use scentd::mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
 use std::env;
 use std::sync::Arc;
 use tokio::signal;
@@ -36,7 +33,7 @@ async fn main() -> Result<(), BoxError> {
 
     // Initialize MQTT client
     info!("Connecting to MQTT broker");
-    let (mqtt_client, mut eventloop) = mqtt::get_mqtt_client();
+    let (mqtt_client, mut eventloop) = scentd::mqtt::get_mqtt_client();
 
     // Verify MQTT connection by polling once
     // This ensures we fail fast if the broker is unreachable
