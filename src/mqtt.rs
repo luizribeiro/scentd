@@ -1,6 +1,6 @@
 use crate::api::{
-    fetch_device_properties, set_device_intensity, set_device_power_state, DeviceInfo,
-    PropertyInfo, Session,
+    fetch_device_properties, set_device_intensity, set_device_power_state,
+    set_pump_life_time_qr_scanned, DeviceInfo, PropertyInfo, Session,
 };
 use log::{debug, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
@@ -82,6 +82,14 @@ pub async fn publish_device_state(
         -1.0
     };
 
+    // Extract fragrance identifier
+    let fragrance_id = properties
+        .iter()
+        .find(|p| p.name == "set_fragrance_identifier")
+        .and_then(|p| p.value.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
     // Construct MQTT topics
     let base_topic = format!("homeassistant/switch/{}", device.dsn);
     let state_topic = format!("{}/state", base_topic);
@@ -134,6 +142,21 @@ pub async fn publish_device_state(
             device.product_name
         );
     }
+
+    // Publish fragrance identifier (retained so Home Assistant gets it immediately on restart)
+    let fragrance_id_topic = format!("{}/fragrance_id/state", base_topic);
+    mqtt_client
+        .publish(
+            fragrance_id_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            fragrance_id.clone(),
+        )
+        .await?;
+    debug!(
+        "Published fragrance ID for {} to topic {}: {}",
+        device.product_name, fragrance_id_topic, fragrance_id
+    );
 
     // For Home Assistant discovery, publish config topics (retained so they persist across HA restarts)
     let config_topic = format!("homeassistant/switch/{}/config", device.dsn);
@@ -230,6 +253,64 @@ pub async fn publish_device_state(
         );
     }
 
+    // Publish fragrance identifier sensor configuration (retained so it persists across HA restarts)
+    let fragrance_id_config_topic = format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
+    let fragrance_id_config_payload = json!({
+        "name": "Fragrance",
+        "state_topic": fragrance_id_topic,
+        "unique_id": format!("{}_fragrance_id", device.dsn),
+        "device": {
+            "identifiers": [device.dsn],
+            "name": device.product_name,
+            "model": device.model,
+            "manufacturer": device.oem_model,
+            "sw_version": device.sw_version
+        },
+        "icon": "mdi:flask",
+    });
+    mqtt_client
+        .publish(
+            fragrance_id_config_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            fragrance_id_config_payload.to_string(),
+        )
+        .await?;
+    debug!(
+        "Published fragrance ID config for {} to topic {}",
+        device.product_name, fragrance_id_config_topic
+    );
+
+    // Publish QR scan button configuration (retained so it persists across HA restarts)
+    let qr_scan_button_config_topic = format!("homeassistant/button/{}_qr_scan/config", device.dsn);
+    let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
+    let qr_scan_button_config_payload = json!({
+        "name": "Reset Fragrance Level",
+        "command_topic": qr_scan_command_topic,
+        "unique_id": format!("{}_qr_scan", device.dsn),
+        "device": {
+            "identifiers": [device.dsn],
+            "name": device.product_name,
+            "model": device.model,
+            "manufacturer": device.oem_model,
+            "sw_version": device.sw_version
+        },
+        "icon": "mdi:qrcode-scan",
+        "payload_press": "PRESS",
+    });
+    mqtt_client
+        .publish(
+            qr_scan_button_config_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            qr_scan_button_config_payload.to_string(),
+        )
+        .await?;
+    debug!(
+        "Published QR scan button config for {} to topic {}",
+        device.product_name, qr_scan_button_config_topic
+    );
+
     Ok(())
 }
 
@@ -252,6 +333,16 @@ pub async fn subscribe_to_commands(
     debug!(
         "Subscribed to intensity command topic: {}",
         intensity_command_topic
+    );
+
+    let qr_scan_command_topic = format!("homeassistant/switch/{}/qr_scan/set", device_dsn);
+    debug!("Subscribing to QR scan command topic: {}", qr_scan_command_topic);
+    mqtt_client
+        .subscribe(qr_scan_command_topic.clone(), QoS::AtLeastOnce)
+        .await?;
+    debug!(
+        "Subscribed to QR scan command topic: {}",
+        qr_scan_command_topic
     );
 
     Ok(())
@@ -317,6 +408,7 @@ pub async fn handle_mqtt_events(
                 let base_topic = format!("homeassistant/switch/{}", device.dsn);
                 let command_topic = format!("{}/set", base_topic);
                 let intensity_command_topic = format!("{}/intensity/set", base_topic);
+                let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
 
                 if topic == command_topic {
                     info!(
@@ -380,6 +472,51 @@ pub async fn handle_mqtt_events(
                         }
                         Err(e) => {
                             warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                        }
+                    }
+                } else if topic == qr_scan_command_topic {
+                    info!(
+                        "Received QR scan command for {}: {}",
+                        device.product_name, payload
+                    );
+
+                    // First, fetch current pump_life_time
+                    match fetch_device_properties(&session, &device.dsn).await {
+                        Ok(properties) => {
+                            let pump_life_time = properties
+                                .iter()
+                                .find(|p| p.name == "pump_life_time")
+                                .and_then(|p| p.value.as_u64())
+                                .unwrap_or(0);
+
+                            info!(
+                                "Setting pump_life_time_qr_scanned to {} for {}",
+                                pump_life_time, device.product_name
+                            );
+
+                            // Set pump_life_time_qr_scanned to current pump_life_time
+                            if let Err(e) = set_pump_life_time_qr_scanned(&session, &device.dsn, pump_life_time).await {
+                                warn!("Failed to set pump_life_time_qr_scanned for {}: {}", device.dsn, e);
+                            } else {
+                                info!("Successfully reset fragrance level for {}", device.product_name);
+
+                                // Fetch and publish updated state to show new 100% level
+                                match fetch_device_properties(&session, &device.dsn).await {
+                                    Ok(updated_properties) => {
+                                        if let Err(e) = publish_device_state(&mqtt_client, device, &updated_properties).await {
+                                            warn!("Failed to publish updated state for {}: {}", device.dsn, e);
+                                        } else {
+                                            info!("Published updated fragrance level for {}", device.dsn);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to fetch updated properties for {}: {}", device.dsn, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to fetch properties for QR scan on {}: {}", device.dsn, e);
                         }
                     }
                 }
@@ -716,5 +853,64 @@ mod tests {
 
         assert_eq!(fragrance_level_topic, "homeassistant/switch/test_dsn_123/fragrance_level/state");
         assert_eq!(fragrance_level_config_topic, "homeassistant/sensor/test_dsn_123_fragrance_level/config");
+    }
+
+    #[test]
+    fn test_fragrance_id_extraction_from_properties() {
+        // Test extracting fragrance identifier from properties
+        let properties = vec![
+            PropertyInfo {
+                name: "set_fragrance_identifier".to_string(),
+                base_type: "string".to_string(),
+                read_only: false,
+                value: serde_json::Value::from("MDN"),
+            },
+        ];
+
+        let fragrance_id = properties
+            .iter()
+            .find(|p| p.name == "set_fragrance_identifier")
+            .and_then(|p| p.value.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        assert_eq!(fragrance_id, "MDN");
+    }
+
+    #[test]
+    fn test_fragrance_id_extraction_missing() {
+        // Test extracting fragrance identifier when property is missing
+        let properties: Vec<PropertyInfo> = vec![];
+
+        let fragrance_id = properties
+            .iter()
+            .find(|p| p.name == "set_fragrance_identifier")
+            .and_then(|p| p.value.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        assert_eq!(fragrance_id, "Unknown");
+    }
+
+    #[test]
+    fn test_fragrance_id_topic_format() {
+        let device = create_test_device();
+        let base_topic = format!("homeassistant/switch/{}", device.dsn);
+        let fragrance_id_topic = format!("{}/fragrance_id/state", base_topic);
+        let fragrance_id_config_topic = format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
+
+        assert_eq!(fragrance_id_topic, "homeassistant/switch/test_dsn_123/fragrance_id/state");
+        assert_eq!(fragrance_id_config_topic, "homeassistant/sensor/test_dsn_123_fragrance_id/config");
+    }
+
+    #[test]
+    fn test_qr_scan_button_topic_format() {
+        let device = create_test_device();
+        let base_topic = format!("homeassistant/switch/{}", device.dsn);
+        let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
+        let qr_scan_button_config_topic = format!("homeassistant/button/{}_qr_scan/config", device.dsn);
+
+        assert_eq!(qr_scan_command_topic, "homeassistant/switch/test_dsn_123/qr_scan/set");
+        assert_eq!(qr_scan_button_config_topic, "homeassistant/button/test_dsn_123_qr_scan/config");
     }
 }

@@ -415,6 +415,53 @@ pub async fn set_device_intensity(
     client.set_device_intensity(session, dsn, intensity).await
 }
 
+impl ApiClient {
+    pub async fn set_pump_life_time_qr_scanned(
+        &self,
+        session: &Arc<Mutex<Session>>,
+        dsn: &str,
+        value: u64,
+    ) -> Result<(), BoxError> {
+        ensure_session_valid(session).await?;
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/apiv1/dsns/{}/properties/pump_life_time_qr_scanned/datapoints.json",
+            self.device_base_url, dsn
+        );
+        let payload = Datapoint {
+            datapoint: DatapointValue {
+                metadata: Value::Object(serde_json::Map::new()),
+                value: Value::from(value),
+            },
+        };
+
+        let mut headers = get_auth_headers(session).await;
+        headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let response = client
+            .post(&url)
+            .headers(headers)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to set pump_life_time_qr_scanned for {}: {}", dsn, response.status()).into());
+        }
+
+        Ok(())
+    }
+}
+
+pub async fn set_pump_life_time_qr_scanned(
+    session: &Arc<Mutex<Session>>,
+    dsn: &str,
+    value: u64,
+) -> Result<(), BoxError> {
+    let client = ApiClient::default();
+    client.set_pump_life_time_qr_scanned(session, dsn, value).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,5 +725,23 @@ mod tests {
 
         let auth_header = headers.get(AUTHORIZATION).unwrap();
         assert_eq!(auth_header, "auth_token test_access_token");
+    }
+
+    #[tokio::test]
+    async fn test_set_pump_life_time_qr_scanned_success() {
+        let mut server = create_mock_server().await;
+
+        let _mock = server.mock("POST", "/apiv1/dsns/DSN123/properties/pump_life_time_qr_scanned/datapoints.json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let client = ApiClient::new(server.url(), server.url());
+        let session = Arc::new(Mutex::new(create_test_session(get_current_epoch() + 3600)));
+
+        let result = client.set_pump_life_time_qr_scanned(&session, "DSN123", 585089).await;
+        assert!(result.is_ok());
     }
 }
