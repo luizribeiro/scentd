@@ -75,11 +75,10 @@ pub async fn publish_device_state(
         let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
         let percentage_remaining = 100.0 - percentage_used;
         // Clamp between 0 and 100
-        percentage_remaining.max(0.0).min(100.0)
+        Some(percentage_remaining.max(0.0).min(100.0))
     } else {
         // QR code never scanned, can't determine level accurately
-        // Return -1 to indicate unknown
-        -1.0
+        None
     };
 
     // Extract fragrance identifier
@@ -122,26 +121,22 @@ pub async fn publish_device_state(
 
     // Publish fragrance level as a separate topic (retained so Home Assistant gets it immediately on restart)
     let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
-    // Only publish if we have a valid reading (QR code was scanned)
-    if fragrance_level >= 0.0 {
-        mqtt_client
-            .publish(
-                fragrance_level_topic.clone(),
-                QoS::AtLeastOnce,
-                true,
-                format!("{:.1}", fragrance_level),
-            )
-            .await?;
-        debug!(
-            "Published fragrance level for {} to topic {}: {:.1}%",
-            device.product_name, fragrance_level_topic, fragrance_level
-        );
-    } else {
-        debug!(
-            "Skipping fragrance level for {} (QR code not scanned)",
-            device.product_name
-        );
-    }
+    let fragrance_level_payload = match fragrance_level {
+        Some(level) => format!("{:.1}", level),
+        None => "unknown".to_string(),
+    };
+    mqtt_client
+        .publish(
+            fragrance_level_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            fragrance_level_payload.clone(),
+        )
+        .await?;
+    debug!(
+        "Published fragrance level for {} to topic {}: {}",
+        device.product_name, fragrance_level_topic, fragrance_level_payload
+    );
 
     // Publish fragrance identifier (retained so Home Assistant gets it immediately on restart)
     let fragrance_id_topic = format!("{}/fragrance_id/state", base_topic);
@@ -221,37 +216,34 @@ pub async fn publish_device_state(
     );
 
     // Publish fragrance level sensor configuration (retained so it persists across HA restarts)
-    // Only publish if we have a valid reading (QR code was scanned)
-    if fragrance_level >= 0.0 {
-        let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
-        let fragrance_level_config_payload = json!({
-            "name": "Fragrance Level",
-            "state_topic": fragrance_level_topic,
-            "unique_id": format!("{}_fragrance_level", device.dsn),
-            "device": {
-                "identifiers": [device.dsn],
-                "name": device.product_name,
-                "model": device.model,
-                "manufacturer": device.oem_model,
-                "sw_version": device.sw_version
-            },
-            "unit_of_measurement": "%",
-            "device_class": "battery",
-            "state_class": "measurement",
-        });
-        mqtt_client
-            .publish(
-                fragrance_level_config_topic.clone(),
-                QoS::AtLeastOnce,
-                true,
-                fragrance_level_config_payload.to_string(),
-            )
-            .await?;
-        debug!(
-            "Published fragrance level config for {} to topic {}",
-            device.product_name, fragrance_level_config_topic
-        );
-    }
+    let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
+    let fragrance_level_config_payload = json!({
+        "name": "Fragrance Level",
+        "state_topic": fragrance_level_topic,
+        "unique_id": format!("{}_fragrance_level", device.dsn),
+        "device": {
+            "identifiers": [device.dsn],
+            "name": device.product_name,
+            "model": device.model,
+            "manufacturer": device.oem_model,
+            "sw_version": device.sw_version
+        },
+        "unit_of_measurement": "%",
+        "device_class": "battery",
+        "state_class": "measurement",
+    });
+    mqtt_client
+        .publish(
+            fragrance_level_config_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            fragrance_level_config_payload.to_string(),
+        )
+        .await?;
+    debug!(
+        "Published fragrance level config for {} to topic {}",
+        device.product_name, fragrance_level_config_topic
+    );
 
     // Publish fragrance identifier sensor configuration (retained so it persists across HA restarts)
     let fragrance_id_config_topic = format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
@@ -799,15 +791,15 @@ mod tests {
         // Test when QR code was never scanned (value is 0)
         let pump_life_time_qr_scanned = 0.0;
 
-        // Should return -1 to indicate unknown
-        let fragrance_level = if pump_life_time_qr_scanned > 0.0 {
+        // Should return None to indicate unknown
+        let fragrance_level: Option<f64> = if pump_life_time_qr_scanned > 0.0 {
             // Would calculate normally
-            0.0
+            Some(0.0)
         } else {
-            -1.0
+            None
         };
 
-        assert_eq!(fragrance_level, -1.0);
+        assert_eq!(fragrance_level, None);
     }
 
     #[test]
