@@ -111,19 +111,30 @@ async fn main() -> Result<(), BoxError> {
         periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
     });
 
-    // Wait for shutdown signal
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("Received shutdown signal (SIGINT/SIGTERM)");
-            info!("Shutting down gracefully...");
-            // Abort the MQTT handler task
-            mqtt_handle.abort();
-            info!("Shutdown complete");
-            Ok(())
+    // Wait for either shutdown signal or MQTT handler exit
+    tokio::select! {
+        result = mqtt_handle => {
+            // MQTT handler exited (likely due to connection error)
+            error!("MQTT handler exited unexpectedly");
+            if let Err(e) = result {
+                error!("MQTT handler task error: {}", e);
+                return Err("MQTT handler failed".into());
+            }
+            Err("MQTT handler exited unexpectedly".into())
         }
-        Err(err) => {
-            error!("Failed to listen for shutdown signal: {}", err);
-            Err(err.into())
+        result = signal::ctrl_c() => {
+            match result {
+                Ok(()) => {
+                    info!("Received shutdown signal (SIGINT/SIGTERM)");
+                    info!("Shutting down gracefully...");
+                    info!("Shutdown complete");
+                    Ok(())
+                }
+                Err(err) => {
+                    error!("Failed to listen for shutdown signal: {}", err);
+                    Err(err.into())
+                }
+            }
         }
     }
 }

@@ -384,138 +384,146 @@ pub async fn handle_mqtt_events(
     devices: Vec<DeviceInfo>,
 ) -> Result<(), BoxError> {
     debug!("Listening for MQTT events");
-    while let Ok(notification) = eventloop.poll().await {
-        debug!("Received MQTT event: {:?}", notification);
-        if let Event::Incoming(Packet::Publish(publish)) = notification {
-            let topic = publish.topic.clone();
-            let payload = match String::from_utf8(publish.payload.to_vec()) {
-                Ok(p) => p,
-                Err(e) => {
-                    warn!("Failed to parse MQTT payload as UTF-8: {}", e);
-                    continue;
-                }
-            };
-
-            for device in &devices {
-                let base_topic = format!("homeassistant/switch/{}", device.dsn);
-                let command_topic = format!("{}/set", base_topic);
-                let intensity_command_topic = format!("{}/intensity/set", base_topic);
-                let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
-
-                if topic == command_topic {
-                    info!(
-                        "Received power command for {}: {}",
-                        device.product_name, payload
-                    );
-                    let state = match payload.as_str() {
-                        "ON" => Some(true),
-                        "OFF" => Some(false),
-                        _ => {
-                            warn!("Unknown payload on power command topic: {}", payload);
-                            None
+    loop {
+        match eventloop.poll().await {
+            Ok(notification) => {
+                debug!("Received MQTT event: {:?}", notification);
+                if let Event::Incoming(Packet::Publish(publish)) = notification {
+                    let topic = publish.topic.clone();
+                    let payload = match String::from_utf8(publish.payload.to_vec()) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!("Failed to parse MQTT payload as UTF-8: {}", e);
+                            continue;
                         }
                     };
 
-                    if let Some(state) = state {
-                        if let Err(e) = set_device_power_state(&session, &device.dsn, state).await {
-                            warn!("Failed to set power state for {}: {}", device.dsn, e);
-                            continue;
-                        }
-                    }
+                    for device in &devices {
+                        let base_topic = format!("homeassistant/switch/{}", device.dsn);
+                        let command_topic = format!("{}/set", base_topic);
+                        let intensity_command_topic = format!("{}/intensity/set", base_topic);
+                        let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
 
-                    // Fetch and publish updated state
-                    match fetch_device_properties(&session, &device.dsn).await {
-                        Ok(properties) => {
-                            debug!("Fetched properties: {:?}", properties);
-                            if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
-                                warn!("Failed to publish device state for {}: {}", device.dsn, e);
-                            } else {
-                                debug!("Published updated state for {}", device.dsn);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
-                        }
-                    }
-                } else if topic == intensity_command_topic {
-                    info!(
-                        "Received intensity command for {}: {}",
-                        device.product_name, payload
-                    );
-                    if let Ok(intensity) = payload.parse::<u8>() {
-                        if let Err(e) = set_device_intensity(&session, &device.dsn, intensity).await {
-                            warn!("Failed to set intensity for {}: {}", device.dsn, e);
-                            continue;
-                        }
-                    } else {
-                        warn!("Invalid intensity value: {}", payload);
-                        continue;
-                    }
-
-                    // Fetch and publish updated state
-                    match fetch_device_properties(&session, &device.dsn).await {
-                        Ok(properties) => {
-                            debug!("Fetched properties: {:?}", properties);
-                            if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
-                                warn!("Failed to publish device state for {}: {}", device.dsn, e);
-                            } else {
-                                debug!("Published updated state for {}", device.dsn);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
-                        }
-                    }
-                } else if topic == qr_scan_command_topic {
-                    info!(
-                        "Received QR scan command for {}: {}",
-                        device.product_name, payload
-                    );
-
-                    // First, fetch current pump_life_time
-                    match fetch_device_properties(&session, &device.dsn).await {
-                        Ok(properties) => {
-                            let pump_life_time = properties
-                                .iter()
-                                .find(|p| p.name == "pump_life_time")
-                                .and_then(|p| p.value.as_u64())
-                                .unwrap_or(0);
-
+                        if topic == command_topic {
                             info!(
-                                "Setting pump_life_time_qr_scanned to {} for {}",
-                                pump_life_time, device.product_name
+                                "Received power command for {}: {}",
+                                device.product_name, payload
                             );
+                            let state = match payload.as_str() {
+                                "ON" => Some(true),
+                                "OFF" => Some(false),
+                                _ => {
+                                    warn!("Unknown payload on power command topic: {}", payload);
+                                    None
+                                }
+                            };
 
-                            // Set pump_life_time_qr_scanned to current pump_life_time
-                            if let Err(e) = set_pump_life_time_qr_scanned(&session, &device.dsn, pump_life_time).await {
-                                warn!("Failed to set pump_life_time_qr_scanned for {}: {}", device.dsn, e);
-                            } else {
-                                info!("Successfully reset fragrance level for {}", device.product_name);
-
-                                // Fetch and publish updated state to show new 100% level
-                                match fetch_device_properties(&session, &device.dsn).await {
-                                    Ok(updated_properties) => {
-                                        if let Err(e) = publish_device_state(&mqtt_client, device, &updated_properties).await {
-                                            warn!("Failed to publish updated state for {}: {}", device.dsn, e);
-                                        } else {
-                                            info!("Published updated fragrance level for {}", device.dsn);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to fetch updated properties for {}: {}", device.dsn, e);
-                                    }
+                            if let Some(state) = state {
+                                if let Err(e) = set_device_power_state(&session, &device.dsn, state).await {
+                                    warn!("Failed to set power state for {}: {}", device.dsn, e);
+                                    continue;
                                 }
                             }
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch properties for QR scan on {}: {}", device.dsn, e);
+
+                            // Fetch and publish updated state
+                            match fetch_device_properties(&session, &device.dsn).await {
+                                Ok(properties) => {
+                                    debug!("Fetched properties: {:?}", properties);
+                                    if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
+                                        warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                                    } else {
+                                        debug!("Published updated state for {}", device.dsn);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                                }
+                            }
+                        } else if topic == intensity_command_topic {
+                            info!(
+                                "Received intensity command for {}: {}",
+                                device.product_name, payload
+                            );
+                            if let Ok(intensity) = payload.parse::<u8>() {
+                                if let Err(e) = set_device_intensity(&session, &device.dsn, intensity).await {
+                                    warn!("Failed to set intensity for {}: {}", device.dsn, e);
+                                    continue;
+                                }
+                            } else {
+                                warn!("Invalid intensity value: {}", payload);
+                                continue;
+                            }
+
+                            // Fetch and publish updated state
+                            match fetch_device_properties(&session, &device.dsn).await {
+                                Ok(properties) => {
+                                    debug!("Fetched properties: {:?}", properties);
+                                    if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
+                                        warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                                    } else {
+                                        debug!("Published updated state for {}", device.dsn);
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                                }
+                            }
+                        } else if topic == qr_scan_command_topic {
+                            info!(
+                                "Received QR scan command for {}: {}",
+                                device.product_name, payload
+                            );
+
+                            // First, fetch current pump_life_time
+                            match fetch_device_properties(&session, &device.dsn).await {
+                                Ok(properties) => {
+                                    let pump_life_time = properties
+                                        .iter()
+                                        .find(|p| p.name == "pump_life_time")
+                                        .and_then(|p| p.value.as_u64())
+                                        .unwrap_or(0);
+
+                                    info!(
+                                        "Setting pump_life_time_qr_scanned to {} for {}",
+                                        pump_life_time, device.product_name
+                                    );
+
+                                    // Set pump_life_time_qr_scanned to current pump_life_time
+                                    if let Err(e) = set_pump_life_time_qr_scanned(&session, &device.dsn, pump_life_time).await {
+                                        warn!("Failed to set pump_life_time_qr_scanned for {}: {}", device.dsn, e);
+                                    } else {
+                                        info!("Successfully reset fragrance level for {}", device.product_name);
+
+                                        // Fetch and publish updated state to show new 100% level
+                                        match fetch_device_properties(&session, &device.dsn).await {
+                                            Ok(updated_properties) => {
+                                                if let Err(e) = publish_device_state(&mqtt_client, device, &updated_properties).await {
+                                                    warn!("Failed to publish updated state for {}: {}", device.dsn, e);
+                                                } else {
+                                                    info!("Published updated fragrance level for {}", device.dsn);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to fetch updated properties for {}: {}", device.dsn, e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to fetch properties for QR scan on {}: {}", device.dsn, e);
+                                }
+                            }
                         }
                     }
                 }
             }
+            Err(e) => {
+                // Log the error and return it to cause the daemon to exit
+                // systemd will restart it automatically
+                return Err(format!("MQTT event loop error: {}", e).into());
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
