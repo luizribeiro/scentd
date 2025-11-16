@@ -52,6 +52,20 @@ pub struct DeviceInfo {
     pub model: String,
     pub oem_model: String,
     pub sw_version: String,
+    // Useful fields for device identification
+    #[serde(default)]
+    pub device_type: Option<String>,
+    #[serde(default)]
+    pub lan_ip: Option<String>,
+    #[serde(default)]
+    pub connection_status: Option<String>,
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub connected_at: Option<String>,
+    // Capture any other fields we haven't explicitly listed
+    #[serde(flatten)]
+    pub extra_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -460,6 +474,53 @@ pub async fn set_pump_life_time_qr_scanned(
 ) -> Result<(), BoxError> {
     let client = ApiClient::default();
     client.set_pump_life_time_qr_scanned(session, dsn, value).await
+}
+
+impl ApiClient {
+    pub async fn set_fragrance_identifier(
+        &self,
+        session: &Arc<Mutex<Session>>,
+        dsn: &str,
+        fragrance_id: &str,
+    ) -> Result<(), BoxError> {
+        ensure_session_valid(session).await?;
+        let client = reqwest::Client::new();
+        let url = format!(
+            "{}/apiv1/dsns/{}/properties/set_fragrance_identifier/datapoints.json",
+            self.device_base_url, dsn
+        );
+        let payload = Datapoint {
+            datapoint: DatapointValue {
+                metadata: Value::Object(serde_json::Map::new()),
+                value: Value::from(fragrance_id),
+            },
+        };
+
+        let mut headers = get_auth_headers(session).await;
+        headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let response = client
+            .post(&url)
+            .headers(headers)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to set fragrance identifier for {}: {}", dsn, response.status()).into());
+        }
+
+        Ok(())
+    }
+}
+
+pub async fn set_fragrance_identifier(
+    session: &Arc<Mutex<Session>>,
+    dsn: &str,
+    fragrance_id: &str,
+) -> Result<(), BoxError> {
+    let client = ApiClient::default();
+    client.set_fragrance_identifier(session, dsn, fragrance_id).await
 }
 
 #[cfg(test)]
