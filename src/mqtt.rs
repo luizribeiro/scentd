@@ -537,6 +537,12 @@ mod tests {
             model: "MODEL_TEST".to_string(),
             oem_model: "OEM_TEST".to_string(),
             sw_version: "1.0.0".to_string(),
+            device_type: None,
+            lan_ip: None,
+            connection_status: None,
+            mac: None,
+            connected_at: None,
+            extra_fields: std::collections::HashMap::new(),
         }
     }
 
