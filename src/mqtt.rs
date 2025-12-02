@@ -442,7 +442,6 @@ pub async fn periodic_state_poller(
     mqtt_client: AsyncClient,
     devices: Vec<DeviceInfo>,
     poll_interval_secs: u64,
-    activity_tracker: Arc<ActivityTracker>,
 ) {
     let mut interval = interval(Duration::from_secs(poll_interval_secs));
     info!(
@@ -466,7 +465,8 @@ pub async fn periodic_state_poller(
                         fail_count += 1;
                     } else {
                         debug!("Published polled state for {}", device.dsn);
-                        activity_tracker.record_activity();
+                        // Note: Activity is tracked by the event handler when PubAck is received,
+                        // not here. publish_device_state only queues the message locally.
                         success_count += 1;
                     }
                 }
@@ -932,13 +932,8 @@ mod tests {
         // We just verify the types compile correctly
         // We can't test the actual polling logic without mocking the API
         // and that would be complex, so we verify the function signature instead
-        let _types_check: fn(
-            Arc<Mutex<Session>>,
-            AsyncClient,
-            Vec<DeviceInfo>,
-            u64,
-            Arc<ActivityTracker>,
-        ) -> _ = periodic_state_poller;
+        let _types_check: fn(Arc<Mutex<Session>>, AsyncClient, Vec<DeviceInfo>, u64) -> _ =
+            periodic_state_poller;
 
         // Verify we can create the necessary types
         let devices = vec![create_test_device()];

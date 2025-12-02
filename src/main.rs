@@ -124,18 +124,10 @@ async fn main() -> Result<(), BoxError> {
     let mqtt_client_poller = mqtt_client.clone();
     let session_poller = session.clone();
     let devices_poller = devices.clone();
-    let activity_tracker_poller = activity_tracker.clone();
     task::spawn(async move {
         // Wait 1 minute before starting periodic polling
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        periodic_state_poller(
-            session_poller,
-            mqtt_client_poller,
-            devices_poller,
-            300,
-            activity_tracker_poller,
-        )
-        .await;
+        periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
     });
 
     // Spawn watchdog to detect dead MQTT connections
