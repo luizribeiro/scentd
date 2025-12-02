@@ -76,7 +76,7 @@ async fn main() -> Result<(), BoxError> {
 }
 
 async fn list_diffusers(session: &Arc<Mutex<scentd::api::Session>>) -> Result<(), BoxError> {
-    let devices = fetch_devices(&session).await?;
+    let devices = fetch_devices(session).await?;
 
     if devices.is_empty() {
         println!("No diffusers found.");
@@ -109,7 +109,7 @@ async fn show_info(
     debug: bool,
 ) -> Result<(), BoxError> {
     // First, get device info
-    let devices = fetch_devices(&session).await?;
+    let devices = fetch_devices(session).await?;
     let device = devices
         .iter()
         .find(|d| d.dsn == dsn)
@@ -131,7 +131,7 @@ async fn show_info(
     println!();
 
     // Get properties
-    let properties = fetch_device_properties(&session, dsn).await?;
+    let properties = fetch_device_properties(session, dsn).await?;
 
     // Extract key properties
     let power_state = properties
@@ -218,8 +218,10 @@ async fn show_info(
 
         println!("\nAll properties:");
         for prop in &properties {
-            println!("  {}: {} (type: {}, read_only: {})",
-                prop.name, prop.value, prop.base_type, prop.read_only);
+            println!(
+                "  {}: {} (type: {}, read_only: {})",
+                prop.name, prop.value, prop.base_type, prop.read_only
+            );
         }
     }
 
@@ -233,17 +235,20 @@ async fn reset_level(
     println!("Resetting fragrance level for device {}...", dsn);
 
     // Fetch current pump_life_time
-    let properties = fetch_device_properties(&session, dsn).await?;
+    let properties = fetch_device_properties(session, dsn).await?;
     let pump_life_time = properties
         .iter()
         .find(|p| p.name == "pump_life_time")
         .and_then(|p| p.value.as_u64())
-        .ok_or_else(|| "Could not find pump_life_time property")?;
+        .ok_or("Could not find pump_life_time property")?;
 
     // Set pump_life_time_qr_scanned to current pump_life_time
-    set_pump_life_time_qr_scanned(&session, dsn, pump_life_time).await?;
+    set_pump_life_time_qr_scanned(session, dsn, pump_life_time).await?;
 
-    println!("✓ Fragrance level reset to 100% (set QR scan value to {})", pump_life_time);
+    println!(
+        "✓ Fragrance level reset to 100% (set QR scan value to {})",
+        pump_life_time
+    );
 
     Ok(())
 }
@@ -254,14 +259,14 @@ async fn set_fragrance(
     fragrance_id: &str,
 ) -> Result<(), BoxError> {
     // First check if the device supports setting fragrance identifier
-    let properties = fetch_device_properties(&session, dsn).await?;
+    let properties = fetch_device_properties(session, dsn).await?;
     let has_set_fragrance = properties
         .iter()
         .any(|p| p.name == "set_fragrance_identifier" && !p.read_only);
 
     if !has_set_fragrance {
         // Get device info to provide a helpful message
-        let devices = fetch_devices(&session).await?;
+        let devices = fetch_devices(session).await?;
         let device = devices.iter().find(|d| d.dsn == dsn);
 
         if let Some(device) = device {
@@ -273,7 +278,8 @@ async fn set_fragrance(
                 \n\
                 Simply insert a cartridge and the device will detect it automatically.",
                 dsn, device.oem_model, device.oem_model
-            ).into());
+            )
+            .into());
         } else {
             return Err(format!(
                 "Cannot set fragrance on {} - device not found or doesn't support this feature.\n\
@@ -281,13 +287,17 @@ async fn set_fragrance(
                 This command only works on aeraMini devices that have a writable \n\
                 'set_fragrance_identifier' property.",
                 dsn
-            ).into());
+            )
+            .into());
         }
     }
 
-    println!("Setting fragrance to '{}' for device {}...", fragrance_id, dsn);
+    println!(
+        "Setting fragrance to '{}' for device {}...",
+        fragrance_id, dsn
+    );
 
-    set_fragrance_identifier(&session, dsn, fragrance_id).await?;
+    set_fragrance_identifier(session, dsn, fragrance_id).await?;
 
     println!("✓ Fragrance identifier set to '{}'", fragrance_id);
 

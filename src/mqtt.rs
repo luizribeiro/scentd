@@ -2,16 +2,68 @@ use crate::api::{
     fetch_device_properties, set_device_intensity, set_device_power_state,
     set_pump_life_time_qr_scanned, DeviceInfo, PropertyInfo, Session,
 };
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::error::Error;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Type alias for Send+Sync errors to work with tokio::spawn
 type BoxError = Box<dyn Error + Send + Sync>;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration, Instant};
+
+/// Tracks the last successful MQTT activity for watchdog monitoring
+pub struct ActivityTracker {
+    /// Timestamp of last activity as seconds since UNIX epoch
+    last_activity_secs: AtomicU64,
+    /// When the tracker was created (for calculating uptime)
+    started_at: Instant,
+}
+
+impl ActivityTracker {
+    pub fn new() -> Self {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            last_activity_secs: AtomicU64::new(now_secs),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Record that MQTT activity just occurred
+    pub fn record_activity(&self) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_activity_secs.store(now_secs, Ordering::Relaxed);
+    }
+
+    /// Returns seconds since last activity
+    pub fn seconds_since_activity(&self) -> u64 {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = self.last_activity_secs.load(Ordering::Relaxed);
+        now_secs.saturating_sub(last)
+    }
+
+    /// Returns how long the tracker has been running
+    pub fn uptime(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+}
+
+impl Default for ActivityTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     // Read MQTT configuration from environment variables
@@ -46,7 +98,7 @@ pub async fn publish_device_state(
         .iter()
         .find(|p| p.name == "set_power_state")
         .and_then(|p| p.value.as_u64())
-        .and_then(|v| Some(v == 1))
+        .map(|v| v == 1)
         .unwrap_or(false);
 
     let intensity_state = properties
@@ -216,7 +268,8 @@ pub async fn publish_device_state(
     );
 
     // Publish fragrance level sensor configuration (retained so it persists across HA restarts)
-    let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
+    let fragrance_level_config_topic =
+        format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
     let fragrance_level_config_payload = json!({
         "name": "Fragrance Level",
         "state_topic": fragrance_level_topic,
@@ -246,7 +299,8 @@ pub async fn publish_device_state(
     );
 
     // Publish fragrance identifier sensor configuration (retained so it persists across HA restarts)
-    let fragrance_id_config_topic = format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
+    let fragrance_id_config_topic =
+        format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
     let fragrance_id_config_payload = json!({
         "name": "Fragrance",
         "state_topic": fragrance_id_topic,
@@ -328,7 +382,10 @@ pub async fn subscribe_to_commands(
     );
 
     let qr_scan_command_topic = format!("homeassistant/switch/{}/qr_scan/set", device_dsn);
-    debug!("Subscribing to QR scan command topic: {}", qr_scan_command_topic);
+    debug!(
+        "Subscribing to QR scan command topic: {}",
+        qr_scan_command_topic
+    );
     mqtt_client
         .subscribe(qr_scan_command_topic.clone(), QoS::AtLeastOnce)
         .await?;
@@ -340,6 +397,43 @@ pub async fn subscribe_to_commands(
     Ok(())
 }
 
+/// Watchdog timeout in seconds (15 minutes)
+/// If no successful MQTT activity occurs within this time, the daemon exits
+const WATCHDOG_TIMEOUT_SECS: u64 = 900;
+
+/// How often the watchdog checks for activity (every 60 seconds)
+const WATCHDOG_CHECK_INTERVAL_SECS: u64 = 60;
+
+/// Monitors MQTT activity and exits if the connection appears dead
+pub async fn watchdog(tracker: Arc<ActivityTracker>) -> Result<(), BoxError> {
+    let mut interval = interval(Duration::from_secs(WATCHDOG_CHECK_INTERVAL_SECS));
+    info!(
+        "Starting MQTT watchdog (timeout: {}s, check interval: {}s)",
+        WATCHDOG_TIMEOUT_SECS, WATCHDOG_CHECK_INTERVAL_SECS
+    );
+
+    loop {
+        interval.tick().await;
+        let inactive_secs = tracker.seconds_since_activity();
+        let uptime = tracker.uptime();
+
+        debug!(
+            "Watchdog check: {}s since last activity, uptime: {:?}",
+            inactive_secs, uptime
+        );
+
+        if inactive_secs > WATCHDOG_TIMEOUT_SECS {
+            error!(
+                "MQTT watchdog triggered: no activity for {}s (threshold: {}s). Connection may be dead.",
+                inactive_secs, WATCHDOG_TIMEOUT_SECS
+            );
+            return Err(
+                format!("Watchdog timeout: no MQTT activity for {}s", inactive_secs).into(),
+            );
+        }
+    }
+}
+
 /// Periodically polls device state and publishes to MQTT
 /// This ensures Home Assistant stays in sync even when device state
 /// changes externally (via app, schedules, etc.)
@@ -348,6 +442,7 @@ pub async fn periodic_state_poller(
     mqtt_client: AsyncClient,
     devices: Vec<DeviceInfo>,
     poll_interval_secs: u64,
+    activity_tracker: Arc<ActivityTracker>,
 ) {
     let mut interval = interval(Duration::from_secs(poll_interval_secs));
     info!(
@@ -357,7 +452,10 @@ pub async fn periodic_state_poller(
 
     loop {
         interval.tick().await;
-        debug!("Polling device states");
+        info!("Polling device states ({} devices)", devices.len());
+
+        let mut success_count = 0;
+        let mut fail_count = 0;
 
         for device in &devices {
             match fetch_device_properties(&session, &device.dsn).await {
@@ -365,15 +463,24 @@ pub async fn periodic_state_poller(
                     debug!("Polled properties for {}: {:?}", device.dsn, properties);
                     if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
                         warn!("Failed to publish polled state for {}: {}", device.dsn, e);
+                        fail_count += 1;
                     } else {
                         debug!("Published polled state for {}", device.dsn);
+                        activity_tracker.record_activity();
+                        success_count += 1;
                     }
                 }
                 Err(e) => {
                     warn!("Failed to poll properties for {}: {}", device.dsn, e);
+                    fail_count += 1;
                 }
             }
         }
+
+        info!(
+            "Polling complete: {} succeeded, {} failed",
+            success_count, fail_count
+        );
     }
 }
 
@@ -382,12 +489,38 @@ pub async fn handle_mqtt_events(
     mqtt_client: &AsyncClient,
     mut eventloop: EventLoop,
     devices: Vec<DeviceInfo>,
+    activity_tracker: Arc<ActivityTracker>,
 ) -> Result<(), BoxError> {
-    debug!("Listening for MQTT events");
+    info!("MQTT event handler started, listening for events");
     loop {
         match eventloop.poll().await {
             Ok(notification) => {
-                debug!("Received MQTT event: {:?}", notification);
+                // Log connection-related events at info level for debugging
+                match &notification {
+                    Event::Incoming(Packet::ConnAck(ack)) => {
+                        info!("MQTT connected: {:?}", ack);
+                        activity_tracker.record_activity();
+                    }
+                    Event::Incoming(Packet::PingResp) => {
+                        debug!("MQTT ping response received");
+                        activity_tracker.record_activity();
+                    }
+                    Event::Incoming(Packet::SubAck(ack)) => {
+                        debug!("MQTT subscription acknowledged: {:?}", ack);
+                        activity_tracker.record_activity();
+                    }
+                    Event::Incoming(Packet::PubAck(ack)) => {
+                        debug!("MQTT publish acknowledged: {:?}", ack);
+                        activity_tracker.record_activity();
+                    }
+                    Event::Outgoing(outgoing) => {
+                        debug!("MQTT outgoing: {:?}", outgoing);
+                    }
+                    _ => {
+                        debug!("MQTT event: {:?}", notification);
+                    }
+                }
+
                 if let Event::Incoming(Packet::Publish(publish)) = notification {
                     let topic = publish.topic.clone();
                     let payload = match String::from_utf8(publish.payload.to_vec()) {
@@ -419,7 +552,9 @@ pub async fn handle_mqtt_events(
                             };
 
                             if let Some(state) = state {
-                                if let Err(e) = set_device_power_state(&session, &device.dsn, state).await {
+                                if let Err(e) =
+                                    set_device_power_state(&session, &device.dsn, state).await
+                                {
                                     warn!("Failed to set power state for {}: {}", device.dsn, e);
                                     continue;
                                 }
@@ -429,14 +564,22 @@ pub async fn handle_mqtt_events(
                             match fetch_device_properties(&session, &device.dsn).await {
                                 Ok(properties) => {
                                     debug!("Fetched properties: {:?}", properties);
-                                    if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
-                                        warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                                    if let Err(e) =
+                                        publish_device_state(mqtt_client, device, &properties).await
+                                    {
+                                        warn!(
+                                            "Failed to publish device state for {}: {}",
+                                            device.dsn, e
+                                        );
                                     } else {
                                         debug!("Published updated state for {}", device.dsn);
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                                    warn!(
+                                        "Failed to fetch device properties for {}: {}",
+                                        device.dsn, e
+                                    );
                                 }
                             }
                         } else if topic == intensity_command_topic {
@@ -445,7 +588,9 @@ pub async fn handle_mqtt_events(
                                 device.product_name, payload
                             );
                             if let Ok(intensity) = payload.parse::<u8>() {
-                                if let Err(e) = set_device_intensity(&session, &device.dsn, intensity).await {
+                                if let Err(e) =
+                                    set_device_intensity(&session, &device.dsn, intensity).await
+                                {
                                     warn!("Failed to set intensity for {}: {}", device.dsn, e);
                                     continue;
                                 }
@@ -458,14 +603,22 @@ pub async fn handle_mqtt_events(
                             match fetch_device_properties(&session, &device.dsn).await {
                                 Ok(properties) => {
                                     debug!("Fetched properties: {:?}", properties);
-                                    if let Err(e) = publish_device_state(&mqtt_client, device, &properties).await {
-                                        warn!("Failed to publish device state for {}: {}", device.dsn, e);
+                                    if let Err(e) =
+                                        publish_device_state(mqtt_client, device, &properties).await
+                                    {
+                                        warn!(
+                                            "Failed to publish device state for {}: {}",
+                                            device.dsn, e
+                                        );
                                     } else {
                                         debug!("Published updated state for {}", device.dsn);
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to fetch device properties for {}: {}", device.dsn, e);
+                                    warn!(
+                                        "Failed to fetch device properties for {}: {}",
+                                        device.dsn, e
+                                    );
                                 }
                             }
                         } else if topic == qr_scan_command_topic {
@@ -489,28 +642,55 @@ pub async fn handle_mqtt_events(
                                     );
 
                                     // Set pump_life_time_qr_scanned to current pump_life_time
-                                    if let Err(e) = set_pump_life_time_qr_scanned(&session, &device.dsn, pump_life_time).await {
-                                        warn!("Failed to set pump_life_time_qr_scanned for {}: {}", device.dsn, e);
+                                    if let Err(e) = set_pump_life_time_qr_scanned(
+                                        &session,
+                                        &device.dsn,
+                                        pump_life_time,
+                                    )
+                                    .await
+                                    {
+                                        warn!(
+                                            "Failed to set pump_life_time_qr_scanned for {}: {}",
+                                            device.dsn, e
+                                        );
                                     } else {
-                                        info!("Successfully reset fragrance level for {}", device.product_name);
+                                        info!(
+                                            "Successfully reset fragrance level for {}",
+                                            device.product_name
+                                        );
 
                                         // Fetch and publish updated state to show new 100% level
                                         match fetch_device_properties(&session, &device.dsn).await {
                                             Ok(updated_properties) => {
-                                                if let Err(e) = publish_device_state(&mqtt_client, device, &updated_properties).await {
+                                                if let Err(e) = publish_device_state(
+                                                    mqtt_client,
+                                                    device,
+                                                    &updated_properties,
+                                                )
+                                                .await
+                                                {
                                                     warn!("Failed to publish updated state for {}: {}", device.dsn, e);
                                                 } else {
-                                                    info!("Published updated fragrance level for {}", device.dsn);
+                                                    info!(
+                                                        "Published updated fragrance level for {}",
+                                                        device.dsn
+                                                    );
                                                 }
                                             }
                                             Err(e) => {
-                                                warn!("Failed to fetch updated properties for {}: {}", device.dsn, e);
+                                                warn!(
+                                                    "Failed to fetch updated properties for {}: {}",
+                                                    device.dsn, e
+                                                );
                                             }
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to fetch properties for QR scan on {}: {}", device.dsn, e);
+                                    warn!(
+                                        "Failed to fetch properties for QR scan on {}: {}",
+                                        device.dsn, e
+                                    );
                                 }
                             }
                         }
@@ -520,6 +700,10 @@ pub async fn handle_mqtt_events(
             Err(e) => {
                 // Log the error and return it to cause the daemon to exit
                 // systemd will restart it automatically
+                error!(
+                    "MQTT event loop error: {}. Connection may be dead, exiting for restart.",
+                    e
+                );
                 return Err(format!("MQTT event loop error: {}", e).into());
             }
         }
@@ -577,8 +761,14 @@ mod tests {
         assert!(expected_state.contains(&device.dsn));
         assert_eq!(expected_command, "homeassistant/switch/test_dsn_123/set");
         assert_eq!(expected_state, "homeassistant/switch/test_dsn_123/state");
-        assert_eq!(expected_intensity_state, "homeassistant/switch/test_dsn_123/intensity/state");
-        assert_eq!(expected_intensity_command, "homeassistant/switch/test_dsn_123/intensity/set");
+        assert_eq!(
+            expected_intensity_state,
+            "homeassistant/switch/test_dsn_123/intensity/state"
+        );
+        assert_eq!(
+            expected_intensity_command,
+            "homeassistant/switch/test_dsn_123/intensity/set"
+        );
     }
 
     #[test]
@@ -691,7 +881,10 @@ mod tests {
         assert_eq!(config_topic, "homeassistant/switch/test_dsn_123/config");
 
         let intensity_config_topic = format!("homeassistant/number/{}/config", device.dsn);
-        assert_eq!(intensity_config_topic, "homeassistant/number/test_dsn_123/config");
+        assert_eq!(
+            intensity_config_topic,
+            "homeassistant/number/test_dsn_123/config"
+        );
     }
 
     #[test]
@@ -739,8 +932,13 @@ mod tests {
         // We just verify the types compile correctly
         // We can't test the actual polling logic without mocking the API
         // and that would be complex, so we verify the function signature instead
-        let _types_check: fn(Arc<Mutex<Session>>, AsyncClient, Vec<DeviceInfo>, u64) -> _ =
-            periodic_state_poller;
+        let _types_check: fn(
+            Arc<Mutex<Session>>,
+            AsyncClient,
+            Vec<DeviceInfo>,
+            u64,
+            Arc<ActivityTracker>,
+        ) -> _ = periodic_state_poller;
 
         // Verify we can create the necessary types
         let devices = vec![create_test_device()];
@@ -855,23 +1053,28 @@ mod tests {
         let device = create_test_device();
         let base_topic = format!("homeassistant/switch/{}", device.dsn);
         let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
-        let fragrance_level_config_topic = format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
+        let fragrance_level_config_topic =
+            format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
 
-        assert_eq!(fragrance_level_topic, "homeassistant/switch/test_dsn_123/fragrance_level/state");
-        assert_eq!(fragrance_level_config_topic, "homeassistant/sensor/test_dsn_123_fragrance_level/config");
+        assert_eq!(
+            fragrance_level_topic,
+            "homeassistant/switch/test_dsn_123/fragrance_level/state"
+        );
+        assert_eq!(
+            fragrance_level_config_topic,
+            "homeassistant/sensor/test_dsn_123_fragrance_level/config"
+        );
     }
 
     #[test]
     fn test_fragrance_id_extraction_from_properties() {
         // Test extracting fragrance identifier from properties
-        let properties = vec![
-            PropertyInfo {
-                name: "set_fragrance_identifier".to_string(),
-                base_type: "string".to_string(),
-                read_only: false,
-                value: serde_json::Value::from("MDN"),
-            },
-        ];
+        let properties = vec![PropertyInfo {
+            name: "set_fragrance_identifier".to_string(),
+            base_type: "string".to_string(),
+            read_only: false,
+            value: serde_json::Value::from("MDN"),
+        }];
 
         let fragrance_id = properties
             .iter()
@@ -903,10 +1106,17 @@ mod tests {
         let device = create_test_device();
         let base_topic = format!("homeassistant/switch/{}", device.dsn);
         let fragrance_id_topic = format!("{}/fragrance_id/state", base_topic);
-        let fragrance_id_config_topic = format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
+        let fragrance_id_config_topic =
+            format!("homeassistant/sensor/{}_fragrance_id/config", device.dsn);
 
-        assert_eq!(fragrance_id_topic, "homeassistant/switch/test_dsn_123/fragrance_id/state");
-        assert_eq!(fragrance_id_config_topic, "homeassistant/sensor/test_dsn_123_fragrance_id/config");
+        assert_eq!(
+            fragrance_id_topic,
+            "homeassistant/switch/test_dsn_123/fragrance_id/state"
+        );
+        assert_eq!(
+            fragrance_id_config_topic,
+            "homeassistant/sensor/test_dsn_123_fragrance_id/config"
+        );
     }
 
     #[test]
@@ -914,9 +1124,48 @@ mod tests {
         let device = create_test_device();
         let base_topic = format!("homeassistant/switch/{}", device.dsn);
         let qr_scan_command_topic = format!("{}/qr_scan/set", base_topic);
-        let qr_scan_button_config_topic = format!("homeassistant/button/{}_qr_scan/config", device.dsn);
+        let qr_scan_button_config_topic =
+            format!("homeassistant/button/{}_qr_scan/config", device.dsn);
 
-        assert_eq!(qr_scan_command_topic, "homeassistant/switch/test_dsn_123/qr_scan/set");
-        assert_eq!(qr_scan_button_config_topic, "homeassistant/button/test_dsn_123_qr_scan/config");
+        assert_eq!(
+            qr_scan_command_topic,
+            "homeassistant/switch/test_dsn_123/qr_scan/set"
+        );
+        assert_eq!(
+            qr_scan_button_config_topic,
+            "homeassistant/button/test_dsn_123_qr_scan/config"
+        );
+    }
+
+    #[test]
+    fn test_activity_tracker_new() {
+        let tracker = ActivityTracker::new();
+        // Just created, so seconds since activity should be 0 or very small
+        assert!(tracker.seconds_since_activity() < 2);
+    }
+
+    #[test]
+    fn test_activity_tracker_record_activity() {
+        let tracker = ActivityTracker::new();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        tracker.record_activity();
+        // Just recorded activity, should be very recent
+        assert!(tracker.seconds_since_activity() < 2);
+    }
+
+    #[test]
+    fn test_activity_tracker_uptime() {
+        let tracker = ActivityTracker::new();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let uptime = tracker.uptime();
+        assert!(uptime.as_millis() >= 50);
+    }
+
+    #[test]
+    fn test_watchdog_timeout_constant() {
+        // Watchdog should be 15 minutes (900 seconds)
+        assert_eq!(WATCHDOG_TIMEOUT_SECS, 900);
+        // Check interval should be 60 seconds
+        assert_eq!(WATCHDOG_CHECK_INTERVAL_SECS, 60);
     }
 }

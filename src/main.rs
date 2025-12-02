@@ -5,7 +5,10 @@ type BoxError = Box<dyn Error + Send + Sync>;
 
 use log::{debug, error, info};
 use scentd::api::{fetch_device_properties, fetch_devices, login};
-use scentd::mqtt::{handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands};
+use scentd::mqtt::{
+    handle_mqtt_events, periodic_state_poller, publish_device_state, subscribe_to_commands,
+    watchdog, ActivityTracker,
+};
 use std::env;
 use std::sync::Arc;
 use tokio::signal;
@@ -35,11 +38,15 @@ async fn main() -> Result<(), BoxError> {
     info!("Connecting to MQTT broker");
     let (mqtt_client, mut eventloop) = scentd::mqtt::get_mqtt_client();
 
+    // Create activity tracker for watchdog
+    let activity_tracker = Arc::new(ActivityTracker::new());
+
     // Verify MQTT connection by polling once
     // This ensures we fail fast if the broker is unreachable
     match eventloop.poll().await {
         Ok(_) => {
             info!("Successfully connected to MQTT broker");
+            activity_tracker.record_activity();
         }
         Err(e) => {
             error!("Failed to connect to MQTT broker: {}", e);
@@ -55,7 +62,10 @@ async fn main() -> Result<(), BoxError> {
         info!("Starting device initialization");
         // Subscribe to command topics and publish initial states
         for device in &devices_clone {
-            info!("Initializing device: {} ({})", device.product_name, device.dsn);
+            info!(
+                "Initializing device: {} ({})",
+                device.product_name, device.dsn
+            );
 
             // Fetch device properties
             let properties = match fetch_device_properties(&session_clone, &device.dsn).await {
@@ -91,8 +101,17 @@ async fn main() -> Result<(), BoxError> {
     let session_clone = session.clone();
     let devices_clone = devices.clone();
     let mqtt_client_clone = mqtt_client.clone();
+    let activity_tracker_clone = activity_tracker.clone();
     let mqtt_handle = task::spawn(async move {
-        if let Err(e) = handle_mqtt_events(session_clone, &mqtt_client_clone, eventloop, devices_clone).await {
+        if let Err(e) = handle_mqtt_events(
+            session_clone,
+            &mqtt_client_clone,
+            eventloop,
+            devices_clone,
+            activity_tracker_clone,
+        )
+        .await
+        {
             error!("MQTT event handler exited with error: {}", e);
             return Err(e);
         }
@@ -105,13 +124,25 @@ async fn main() -> Result<(), BoxError> {
     let mqtt_client_poller = mqtt_client.clone();
     let session_poller = session.clone();
     let devices_poller = devices.clone();
+    let activity_tracker_poller = activity_tracker.clone();
     task::spawn(async move {
         // Wait 1 minute before starting periodic polling
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        periodic_state_poller(session_poller, mqtt_client_poller, devices_poller, 300).await;
+        periodic_state_poller(
+            session_poller,
+            mqtt_client_poller,
+            devices_poller,
+            300,
+            activity_tracker_poller,
+        )
+        .await;
     });
 
-    // Wait for either shutdown signal or MQTT handler exit
+    // Spawn watchdog to detect dead MQTT connections
+    let activity_tracker_watchdog = activity_tracker.clone();
+    let watchdog_handle = task::spawn(async move { watchdog(activity_tracker_watchdog).await });
+
+    // Wait for shutdown signal, MQTT handler exit, or watchdog trigger
     tokio::select! {
         result = mqtt_handle => {
             // MQTT handler exited (likely due to connection error)
@@ -121,6 +152,14 @@ async fn main() -> Result<(), BoxError> {
                 return Err("MQTT handler failed".into());
             }
             Err("MQTT handler exited unexpectedly".into())
+        }
+        result = watchdog_handle => {
+            // Watchdog triggered (no MQTT activity for too long)
+            error!("Watchdog triggered - MQTT connection appears dead");
+            if let Err(e) = result {
+                error!("Watchdog task error: {}", e);
+            }
+            Err("Watchdog timeout - restarting".into())
         }
         result = signal::ctrl_c() => {
             match result {

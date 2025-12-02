@@ -239,7 +239,10 @@ impl ApiClient {
             session.refresh_token = auth_response.refresh_token;
             session.expires_at = expires_at;
 
-            info!("Token refresh successful (expires in {} hours)", expires_in_hours);
+            info!(
+                "Token refresh successful (expires in {} hours)",
+                expires_in_hours
+            );
             Ok(())
         } else {
             let status = response.status();
@@ -289,9 +292,7 @@ impl ApiClient {
     }
 }
 
-pub async fn fetch_devices(
-    session: &Arc<Mutex<Session>>,
-) -> Result<Vec<DeviceInfo>, BoxError> {
+pub async fn fetch_devices(session: &Arc<Mutex<Session>>) -> Result<Vec<DeviceInfo>, BoxError> {
     let client = ApiClient::default();
     client.fetch_devices(session).await
 }
@@ -315,7 +316,12 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to fetch device properties for {}: {}", dsn, response.status()).into());
+            return Err(format!(
+                "Failed to fetch device properties for {}: {}",
+                dsn,
+                response.status()
+            )
+            .into());
         }
 
         let properties: Vec<Property> = response.json().await?;
@@ -362,7 +368,12 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to set power state for {}: {}", dsn, response.status()).into());
+            return Err(format!(
+                "Failed to set power state for {}: {}",
+                dsn,
+                response.status()
+            )
+            .into());
         }
 
         Ok(())
@@ -385,8 +396,8 @@ impl ApiClient {
         dsn: &str,
         intensity: u8,
     ) -> Result<(), BoxError> {
-        if intensity < 1 || intensity > 5 {
-            return Err(format!("Intensity must be between 1 and 5").into());
+        if !(1..=5).contains(&intensity) {
+            return Err("Intensity must be between 1 and 5".to_string().into());
         }
 
         ensure_session_valid(session).await?;
@@ -413,7 +424,9 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to set intensity for {}: {}", dsn, response.status()).into());
+            return Err(
+                format!("Failed to set intensity for {}: {}", dsn, response.status()).into(),
+            );
         }
 
         Ok(())
@@ -460,7 +473,12 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to set pump_life_time_qr_scanned for {}: {}", dsn, response.status()).into());
+            return Err(format!(
+                "Failed to set pump_life_time_qr_scanned for {}: {}",
+                dsn,
+                response.status()
+            )
+            .into());
         }
 
         Ok(())
@@ -473,7 +491,9 @@ pub async fn set_pump_life_time_qr_scanned(
     value: u64,
 ) -> Result<(), BoxError> {
     let client = ApiClient::default();
-    client.set_pump_life_time_qr_scanned(session, dsn, value).await
+    client
+        .set_pump_life_time_qr_scanned(session, dsn, value)
+        .await
 }
 
 impl ApiClient {
@@ -507,7 +527,12 @@ impl ApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(format!("Failed to set fragrance identifier for {}: {}", dsn, response.status()).into());
+            return Err(format!(
+                "Failed to set fragrance identifier for {}: {}",
+                dsn,
+                response.status()
+            )
+            .into());
         }
 
         Ok(())
@@ -520,7 +545,9 @@ pub async fn set_fragrance_identifier(
     fragrance_id: &str,
 ) -> Result<(), BoxError> {
     let client = ApiClient::default();
-    client.set_fragrance_identifier(session, dsn, fragrance_id).await
+    client
+        .set_fragrance_identifier(session, dsn, fragrance_id)
+        .await
 }
 
 #[cfg(test)]
@@ -546,14 +573,17 @@ mod tests {
     async fn test_login_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/users/sign_in.json")
+        let _mock = server
+            .mock("POST", "/users/sign_in.json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "access_token": "new_access_token",
                 "refresh_token": "new_refresh_token",
                 "expires_in": 3600
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -571,7 +601,8 @@ mod tests {
     async fn test_login_failure() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/users/sign_in.json")
+        let _mock = server
+            .mock("POST", "/users/sign_in.json")
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -588,14 +619,17 @@ mod tests {
     async fn test_refresh_token_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/users/refresh_token.json")
+        let _mock = server
+            .mock("POST", "/users/refresh_token.json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "access_token": "refreshed_access_token",
                 "refresh_token": "refreshed_refresh_token",
                 "expires_in": 7200
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -614,10 +648,12 @@ mod tests {
     async fn test_fetch_devices_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("GET", "/apiv1/devices.json")
+        let _mock = server
+            .mock("GET", "/apiv1/devices.json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[
+            .with_body(
+                r#"[
                 {
                     "device": {
                         "product_name": "Test Device 1",
@@ -636,7 +672,8 @@ mod tests {
                         "sw_version": "2.0"
                     }
                 }
-            ]"#)
+            ]"#,
+            )
             .create_async()
             .await;
 
@@ -657,10 +694,12 @@ mod tests {
     async fn test_fetch_device_properties_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("GET", "/apiv1/dsns/DSN123/properties.json")
+        let _mock = server
+            .mock("GET", "/apiv1/dsns/DSN123/properties.json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"[
+            .with_body(
+                r#"[
                 {
                     "property": {
                         "name": "set_power_state",
@@ -677,7 +716,8 @@ mod tests {
                         "value": 3
                     }
                 }
-            ]"#)
+            ]"#,
+            )
             .create_async()
             .await;
 
@@ -699,7 +739,11 @@ mod tests {
     async fn test_set_device_power_state_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/apiv1/dsns/DSN123/properties/set_power_state/datapoints.json")
+        let _mock = server
+            .mock(
+                "POST",
+                "/apiv1/dsns/DSN123/properties/set_power_state/datapoints.json",
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{}")
@@ -709,7 +753,9 @@ mod tests {
         let client = ApiClient::new(server.url(), server.url());
         let session = Arc::new(Mutex::new(create_test_session(get_current_epoch() + 3600)));
 
-        let result = client.set_device_power_state(&session, "DSN123", true).await;
+        let result = client
+            .set_device_power_state(&session, "DSN123", true)
+            .await;
         assert!(result.is_ok());
     }
 
@@ -717,7 +763,11 @@ mod tests {
     async fn test_set_device_intensity_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/apiv1/dsns/DSN123/properties/set_intensity_manual/datapoints.json")
+        let _mock = server
+            .mock(
+                "POST",
+                "/apiv1/dsns/DSN123/properties/set_intensity_manual/datapoints.json",
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{}")
@@ -739,12 +789,18 @@ mod tests {
         // Test intensity below valid range
         let result = client.set_device_intensity(&session, "DSN123", 0).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 1 and 5"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be between 1 and 5"));
 
         // Test intensity above valid range
         let result = client.set_device_intensity(&session, "DSN123", 6).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be between 1 and 5"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be between 1 and 5"));
     }
 
     #[tokio::test]
@@ -792,7 +848,11 @@ mod tests {
     async fn test_set_pump_life_time_qr_scanned_success() {
         let mut server = create_mock_server().await;
 
-        let _mock = server.mock("POST", "/apiv1/dsns/DSN123/properties/pump_life_time_qr_scanned/datapoints.json")
+        let _mock = server
+            .mock(
+                "POST",
+                "/apiv1/dsns/DSN123/properties/pump_life_time_qr_scanned/datapoints.json",
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body("{}")
@@ -802,7 +862,9 @@ mod tests {
         let client = ApiClient::new(server.url(), server.url());
         let session = Arc::new(Mutex::new(create_test_session(get_current_epoch() + 3600)));
 
-        let result = client.set_pump_life_time_qr_scanned(&session, "DSN123", 585089).await;
+        let result = client
+            .set_pump_life_time_qr_scanned(&session, "DSN123", 585089)
+            .await;
         assert!(result.is_ok());
     }
 }
