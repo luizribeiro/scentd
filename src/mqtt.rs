@@ -484,106 +484,69 @@ pub async fn periodic_state_poller(
     }
 }
 
-/// Handle a power command in a spawned task (doesn't block the event loop)
+/// Fetch device properties and publish state to MQTT.
+/// This is the common pattern used after any command that modifies device state.
+async fn fetch_and_publish_state(
+    session: &Arc<Mutex<Session>>,
+    mqtt_client: &AsyncClient,
+    device: &DeviceInfo,
+) -> Result<(), BoxError> {
+    let properties = fetch_device_properties(session, &device.dsn).await?;
+    publish_device_state(mqtt_client, device, &properties).await?;
+    Ok(())
+}
+
+/// Handle a power command (runs in spawned task, doesn't block event loop)
 async fn handle_power_command(
     session: Arc<Mutex<Session>>,
     mqtt_client: AsyncClient,
     device: DeviceInfo,
     state: bool,
-) {
-    let dsn = device.dsn.clone();
-
-    if let Err(e) = set_device_power_state(&session, &dsn, state).await {
-        warn!("Failed to set power state for {}: {}", dsn, e);
-        return;
-    }
-
-    match fetch_device_properties(&session, &dsn).await {
-        Ok(properties) => {
-            if let Err(e) = publish_device_state(&mqtt_client, &device, &properties).await {
-                warn!("Failed to publish device state for {}: {}", dsn, e);
-            }
-        }
-        Err(e) => {
-            warn!("Failed to fetch device properties for {}: {}", dsn, e);
-        }
-    }
+) -> Result<(), BoxError> {
+    set_device_power_state(&session, &device.dsn, state).await?;
+    fetch_and_publish_state(&session, &mqtt_client, &device).await
 }
 
-/// Handle an intensity command in a spawned task (doesn't block the event loop)
+/// Handle an intensity command (runs in spawned task, doesn't block event loop)
 async fn handle_intensity_command(
     session: Arc<Mutex<Session>>,
     mqtt_client: AsyncClient,
     device: DeviceInfo,
     intensity: u8,
-) {
-    let dsn = device.dsn.clone();
-
-    if let Err(e) = set_device_intensity(&session, &dsn, intensity).await {
-        warn!("Failed to set intensity for {}: {}", dsn, e);
-        return;
-    }
-
-    match fetch_device_properties(&session, &dsn).await {
-        Ok(properties) => {
-            if let Err(e) = publish_device_state(&mqtt_client, &device, &properties).await {
-                warn!("Failed to publish device state for {}: {}", dsn, e);
-            }
-        }
-        Err(e) => {
-            warn!("Failed to fetch device properties for {}: {}", dsn, e);
-        }
-    }
+) -> Result<(), BoxError> {
+    set_device_intensity(&session, &device.dsn, intensity).await?;
+    fetch_and_publish_state(&session, &mqtt_client, &device).await
 }
 
-/// Handle a QR scan command in a spawned task (doesn't block the event loop)
+/// Handle a QR scan command (runs in spawned task, doesn't block event loop)
 async fn handle_qr_scan_command(
     session: Arc<Mutex<Session>>,
     mqtt_client: AsyncClient,
     device: DeviceInfo,
-) {
-    let dsn = device.dsn.clone();
-    let product_name = device.product_name.clone();
+) -> Result<(), BoxError> {
+    let properties = fetch_device_properties(&session, &device.dsn).await?;
 
-    match fetch_device_properties(&session, &dsn).await {
-        Ok(properties) => {
-            let pump_life_time = properties
-                .iter()
-                .find(|p| p.name == "pump_life_time")
-                .and_then(|p| p.value.as_u64())
-                .unwrap_or(0);
+    let pump_life_time = properties
+        .iter()
+        .find(|p| p.name == "pump_life_time")
+        .and_then(|p| p.value.as_u64())
+        .unwrap_or(0);
 
-            info!(
-                "Setting pump_life_time_qr_scanned to {} for {}",
-                pump_life_time, product_name
-            );
+    info!(
+        "Setting pump_life_time_qr_scanned to {} for {}",
+        pump_life_time, device.product_name
+    );
 
-            if let Err(e) = set_pump_life_time_qr_scanned(&session, &dsn, pump_life_time).await {
-                warn!("Failed to set pump_life_time_qr_scanned for {}: {}", dsn, e);
-                return;
-            }
+    set_pump_life_time_qr_scanned(&session, &device.dsn, pump_life_time).await?;
+    info!(
+        "Successfully reset fragrance level for {}",
+        device.product_name
+    );
 
-            info!("Successfully reset fragrance level for {}", product_name);
+    fetch_and_publish_state(&session, &mqtt_client, &device).await?;
+    info!("Published updated fragrance level for {}", device.dsn);
 
-            match fetch_device_properties(&session, &dsn).await {
-                Ok(updated_properties) => {
-                    if let Err(e) =
-                        publish_device_state(&mqtt_client, &device, &updated_properties).await
-                    {
-                        warn!("Failed to publish updated state for {}: {}", dsn, e);
-                    } else {
-                        info!("Published updated fragrance level for {}", dsn);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to fetch updated properties for {}: {}", dsn, e);
-                }
-            }
-        }
-        Err(e) => {
-            warn!("Failed to fetch properties for QR scan on {}: {}", dsn, e);
-        }
-    }
+    Ok(())
 }
 
 pub async fn handle_mqtt_events(
@@ -654,13 +617,21 @@ pub async fn handle_mqtt_events(
                             };
 
                             if let Some(state) = state {
-                                // Spawn command handler to not block the event loop
-                                tokio::spawn(handle_power_command(
-                                    session.clone(),
-                                    mqtt_client.clone(),
-                                    device.clone(),
-                                    state,
-                                ));
+                                let session = session.clone();
+                                let mqtt_client = mqtt_client.clone();
+                                let device = device.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = handle_power_command(
+                                        session,
+                                        mqtt_client,
+                                        device.clone(),
+                                        state,
+                                    )
+                                    .await
+                                    {
+                                        warn!("Power command failed for {}: {}", device.dsn, e);
+                                    }
+                                });
                             }
                         } else if topic == intensity_command_topic {
                             info!(
@@ -668,13 +639,21 @@ pub async fn handle_mqtt_events(
                                 device.product_name, payload
                             );
                             if let Ok(intensity) = payload.parse::<u8>() {
-                                // Spawn command handler to not block the event loop
-                                tokio::spawn(handle_intensity_command(
-                                    session.clone(),
-                                    mqtt_client.clone(),
-                                    device.clone(),
-                                    intensity,
-                                ));
+                                let session = session.clone();
+                                let mqtt_client = mqtt_client.clone();
+                                let device = device.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = handle_intensity_command(
+                                        session,
+                                        mqtt_client,
+                                        device.clone(),
+                                        intensity,
+                                    )
+                                    .await
+                                    {
+                                        warn!("Intensity command failed for {}: {}", device.dsn, e);
+                                    }
+                                });
                             } else {
                                 warn!("Invalid intensity value: {}", payload);
                             }
@@ -683,12 +662,17 @@ pub async fn handle_mqtt_events(
                                 "Received QR scan command for {}: {}",
                                 device.product_name, payload
                             );
-                            // Spawn command handler to not block the event loop
-                            tokio::spawn(handle_qr_scan_command(
-                                session.clone(),
-                                mqtt_client.clone(),
-                                device.clone(),
-                            ));
+                            let session = session.clone();
+                            let mqtt_client = mqtt_client.clone();
+                            let device = device.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) =
+                                    handle_qr_scan_command(session, mqtt_client, device.clone())
+                                        .await
+                                {
+                                    warn!("QR scan command failed for {}: {}", device.dsn, e);
+                                }
+                            });
                         }
                     }
                 }
