@@ -2,6 +2,7 @@ use crate::api::{
     fetch_device_properties, set_device_intensity, set_device_power_state,
     set_pump_life_time_qr_scanned, DeviceInfo, PropertyInfo, Session,
 };
+use crate::config::capacity_for_fragrance_id;
 use log::{debug, error, info, warn};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use serde_json::json;
@@ -83,11 +84,6 @@ pub fn get_mqtt_client() -> (AsyncClient, EventLoop) {
     AsyncClient::new(mqttoptions, 10)
 }
 
-// Default cartridge capacity in pump lifetime units
-// Based on typical Aera cartridge life (~800-1000 hours of runtime)
-// This value can be adjusted based on actual cartridge specifications
-const DEFAULT_CARTRIDGE_CAPACITY: f64 = 300000.0;
-
 pub async fn publish_device_state(
     mqtt_client: &AsyncClient,
     device: &DeviceInfo,
@@ -120,19 +116,6 @@ pub async fn publish_device_state(
         .and_then(|p| p.value.as_u64())
         .unwrap_or(0) as f64;
 
-    // Calculate fragrance level percentage
-    // If QR code was never scanned (value is 0), we can't calculate accurate level
-    let fragrance_level = if pump_life_time_qr_scanned > 0.0 {
-        let usage = pump_life_time - pump_life_time_qr_scanned;
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
-        let percentage_remaining = 100.0 - percentage_used;
-        // Clamp between 0 and 100
-        Some(percentage_remaining.max(0.0).min(100.0))
-    } else {
-        // QR code never scanned, can't determine level accurately
-        None
-    };
-
     // Extract fragrance identifier
     let fragrance_id = properties
         .iter()
@@ -140,6 +123,21 @@ pub async fn publish_device_state(
         .and_then(|p| p.value.as_str())
         .unwrap_or("Unknown")
         .to_string();
+
+    // Calculate fragrance level percentage
+    // If QR code was never scanned (value is 0), we can't calculate accurate level
+    let fragrance_level = if pump_life_time_qr_scanned > 0.0 {
+        let capacity = capacity_for_fragrance_id(&fragrance_id)
+            .ok_or_else(|| format!("Missing capacity mapping for fragrance ID '{}'", fragrance_id))?;
+        let usage = pump_life_time - pump_life_time_qr_scanned;
+        let percentage_used = (usage / capacity) * 100.0;
+        let percentage_remaining = 100.0 - percentage_used;
+        // Clamp between 0 and 100
+        Some(percentage_remaining.max(0.0).min(100.0))
+    } else {
+        // QR code never scanned, can't determine level accurately
+        None
+    };
 
     // Construct MQTT topics
     let base_topic = format!("homeassistant/switch/{}", device.dsn);
@@ -923,11 +921,13 @@ mod tests {
 
     #[test]
     fn test_fragrance_level_calculation_full_cartridge() {
+        const TEST_CAPACITY: f64 = 3.0e5;
+
         // Test nearly full cartridge (99% remaining)
         let pump_life_time = 585089.0;
         let pump_life_time_qr_scanned = 582062.0;
         let usage = pump_life_time - pump_life_time_qr_scanned; // 3027
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_used = (usage / TEST_CAPACITY) * 100.0;
         let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
 
         // Should be approximately 99%
@@ -936,11 +936,13 @@ mod tests {
 
     #[test]
     fn test_fragrance_level_calculation_half_used() {
+        const TEST_CAPACITY: f64 = 3.0e5;
+
         // Test half-used cartridge
         let pump_life_time = 150000.0;
         let pump_life_time_qr_scanned = 0.0;
         let usage = pump_life_time - pump_life_time_qr_scanned;
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_used = (usage / TEST_CAPACITY) * 100.0;
         let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
 
         // Should be 50%
@@ -949,11 +951,13 @@ mod tests {
 
     #[test]
     fn test_fragrance_level_calculation_empty() {
+        const TEST_CAPACITY: f64 = 3.0e5;
+
         // Test empty cartridge (used full capacity)
-        let pump_life_time = 300000.0;
+        let pump_life_time = TEST_CAPACITY;
         let pump_life_time_qr_scanned = 0.0;
         let usage = pump_life_time - pump_life_time_qr_scanned;
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_used = (usage / TEST_CAPACITY) * 100.0;
         let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
 
         // Should be 0%
@@ -962,11 +966,13 @@ mod tests {
 
     #[test]
     fn test_fragrance_level_calculation_over_capacity() {
+        const TEST_CAPACITY: f64 = 3.0e5;
+
         // Test over capacity (should clamp to 0%)
-        let pump_life_time = 500000.0;
+        let pump_life_time = 5.0e5;
         let pump_life_time_qr_scanned = 0.0;
         let usage = pump_life_time - pump_life_time_qr_scanned;
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_used = (usage / TEST_CAPACITY) * 100.0;
         let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
 
         // Should be clamped to 0%

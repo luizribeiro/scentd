@@ -6,6 +6,7 @@ use scentd::api::{
     fetch_device_properties, fetch_devices, login, set_fragrance_identifier,
     set_pump_life_time_qr_scanned,
 };
+use scentd::config::capacity_for_fragrance_id;
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
@@ -166,10 +167,11 @@ async fn show_info(
         .unwrap_or(0);
 
     // Calculate fragrance level
-    const DEFAULT_CARTRIDGE_CAPACITY: f64 = 300000.0;
     let fragrance_level = if pump_life_time_qr_scanned > 0 {
+        let capacity = capacity_for_fragrance_id(fragrance_id)
+            .ok_or_else(|| format!("Missing capacity mapping for fragrance ID '{}'", fragrance_id))?;
         let usage = (pump_life_time - pump_life_time_qr_scanned) as f64;
-        let percentage_used = (usage / DEFAULT_CARTRIDGE_CAPACITY) * 100.0;
+        let percentage_used = (usage / capacity) * 100.0;
         let percentage_remaining = (100.0 - percentage_used).max(0.0).min(100.0);
         format!("{:.1}%", percentage_remaining)
     } else {
