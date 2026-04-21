@@ -169,11 +169,15 @@ pub async fn publish_device_state(
         device.product_name, intensity_topic, intensity_state
     );
 
-    // Publish fragrance level as a separate topic (retained so Home Assistant gets it immediately on restart)
+    // The sensor has a numeric device_class, so HA rejects non-numeric payloads.
+    // When the level can't be computed (QR code never scanned) mark the sensor
+    // unavailable via a dedicated availability topic, and publish an empty state
+    // payload so any retained value in the broker is cleared.
     let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
-    let fragrance_level_payload = match fragrance_level {
-        Some(level) => format!("{:.1}", level),
-        None => "unknown".to_string(),
+    let fragrance_level_availability_topic = format!("{}/fragrance_level/availability", base_topic);
+    let (fragrance_level_payload, fragrance_level_availability) = match fragrance_level {
+        Some(level) => (format!("{:.1}", level), "online"),
+        None => (String::new(), "offline"),
     };
     mqtt_client
         .publish(
@@ -183,9 +187,20 @@ pub async fn publish_device_state(
             fragrance_level_payload.clone(),
         )
         .await?;
+    mqtt_client
+        .publish(
+            fragrance_level_availability_topic.clone(),
+            QoS::AtLeastOnce,
+            true,
+            fragrance_level_availability,
+        )
+        .await?;
     debug!(
-        "Published fragrance level for {} to topic {}: {}",
-        device.product_name, fragrance_level_topic, fragrance_level_payload
+        "Published fragrance level for {} to topic {}: {:?} (availability: {})",
+        device.product_name,
+        fragrance_level_topic,
+        fragrance_level_payload,
+        fragrance_level_availability
     );
 
     // Publish fragrance identifier (retained so Home Assistant gets it immediately on restart)
@@ -271,6 +286,7 @@ pub async fn publish_device_state(
     let fragrance_level_config_payload = json!({
         "name": "Fragrance Level",
         "state_topic": fragrance_level_topic,
+        "availability_topic": fragrance_level_availability_topic,
         "unique_id": format!("{}_fragrance_level", device.dsn),
         "device": {
             "identifiers": [device.dsn],
@@ -1034,6 +1050,8 @@ mod tests {
         let device = create_test_device();
         let base_topic = format!("homeassistant/switch/{}", device.dsn);
         let fragrance_level_topic = format!("{}/fragrance_level/state", base_topic);
+        let fragrance_level_availability_topic =
+            format!("{}/fragrance_level/availability", base_topic);
         let fragrance_level_config_topic =
             format!("homeassistant/sensor/{}_fragrance_level/config", device.dsn);
 
@@ -1042,9 +1060,35 @@ mod tests {
             "homeassistant/switch/test_dsn_123/fragrance_level/state"
         );
         assert_eq!(
+            fragrance_level_availability_topic,
+            "homeassistant/switch/test_dsn_123/fragrance_level/availability"
+        );
+        assert_eq!(
             fragrance_level_config_topic,
             "homeassistant/sensor/test_dsn_123_fragrance_level/config"
         );
+    }
+
+    #[test]
+    fn test_fragrance_level_payload_when_known() {
+        let fragrance_level: Option<f64> = Some(42.5);
+        let (payload, availability) = match fragrance_level {
+            Some(level) => (format!("{:.1}", level), "online"),
+            None => (String::new(), "offline"),
+        };
+        assert_eq!(payload, "42.5");
+        assert_eq!(availability, "online");
+    }
+
+    #[test]
+    fn test_fragrance_level_payload_when_unknown() {
+        let fragrance_level: Option<f64> = None;
+        let (payload, availability) = match fragrance_level {
+            Some(level) => (format!("{:.1}", level), "online"),
+            None => (String::new(), "offline"),
+        };
+        assert_eq!(payload, "");
+        assert_eq!(availability, "offline");
     }
 
     #[test]
